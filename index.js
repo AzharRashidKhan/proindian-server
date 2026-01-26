@@ -21,11 +21,6 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-/* ================= CACHE ================= */
-
-let cache = {};
-const CACHE_DURATION = 2 * 60 * 1000;
-
 /* ================= FETCH NEWS ================= */
 
 async function fetchNews() {
@@ -56,7 +51,7 @@ async function fetchNews() {
       await db.collection("news").add({
         title: article.title,
         summary: article.description || "",
-        category: "India",
+        category: "India", // can upgrade to AI categorization later
         source: article.source.name,
         sourceUrl: article.url,
         image: article.urlToImage || "",
@@ -76,33 +71,50 @@ async function fetchNews() {
 
 app.get("/news", async (req, res) => {
   try {
-    const { category, lastTimestamp } = req.query;
-    const limit = 10;
+    const limit = parseInt(req.query.limit) || 10;
+    const category = req.query.category;
+    const lastTimestamp = req.query.lastTimestamp;
 
-    let query = db.collection("news").orderBy("timestamp", "desc");
+    let query = db.collection("news");
 
-    if (category && category !== "All" && category !== "Trending") {
+    if (category && category !== "All") {
       query = query.where("category", "==", category);
     }
 
+    query = query.orderBy("timestamp", "desc").limit(limit);
+
     if (lastTimestamp) {
-      query = query.startAfter(new Date(Number(lastTimestamp)));
+      const cursorDate = new Date(lastTimestamp);
+      query = query.startAfter(cursorDate);
     }
 
-    const snapshot = await query.limit(limit).get();
+    const snapshot = await query.get();
 
-    const news = snapshot.docs.map(doc => ({
+    const articles = snapshot.docs.map(doc => ({
       id: doc.id,
       ...doc.data(),
     }));
 
-    res.json(news);
+    let newLastTimestamp = null;
+
+    if (articles.length > 0) {
+      const last = articles[articles.length - 1].timestamp;
+      if (last && last.toDate) {
+        newLastTimestamp = last.toDate().toISOString();
+      }
+    }
+
+    res.json({
+      articles,
+      lastTimestamp: newLastTimestamp,
+    });
   } catch (err) {
-    res.status(500).json({ error: "Failed to fetch news" });
+    console.error(err);
+    res.status(500).json({ error: "Pagination failed" });
   }
 });
 
-/* ================= TRENDING (24 HOURS) ================= */
+/* ================= TRENDING (SMART 24H DECAY) ================= */
 
 app.get("/news/trending", async (req, res) => {
   try {
@@ -119,13 +131,26 @@ app.get("/news/trending", async (req, res) => {
       ...doc.data(),
     }));
 
-    news = news.map(article => ({
-      ...article,
-      trendingScore:
-        (article.likes || 0) * 4 +
-        (article.views || 0) -
-        ((Date.now() - new Date(article.timestamp).getTime()) / 10000000),
-    }));
+    // 🔥 Smart time-decay formula
+    news = news.map(article => {
+      const likes = article.likes || 0;
+      const views = article.views || 0;
+
+      const ageHours =
+        (Date.now() -
+          (article.timestamp?.toDate
+            ? article.timestamp.toDate().getTime()
+            : Date.now())) /
+        (1000 * 60 * 60);
+
+      const score =
+        (likes * 5 + views * 1) / Math.pow(ageHours + 2, 1.5);
+
+      return {
+        ...article,
+        trendingScore: score,
+      };
+    });
 
     news.sort((a, b) => b.trendingScore - a.trendingScore);
 
@@ -161,6 +186,12 @@ app.post("/news/:id/view", async (req, res) => {
   } catch {
     res.status(500).json({ error: "View failed" });
   }
+});
+
+/* ================= HEALTH CHECK ================= */
+
+app.get("/", (req, res) => {
+  res.send("ProIndian Server Running 🚀");
 });
 
 /* ================= CRON ================= */
