@@ -1,5 +1,4 @@
 require("dotenv").config();
-
 const express = require("express");
 const axios = require("axios");
 const cron = require("node-cron");
@@ -10,9 +9,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-/* ==============================
-   FIREBASE INITIALIZATION
-============================== */
+/* ================= FIREBASE INIT ================= */
 
 admin.initializeApp({
   credential: admin.credential.cert({
@@ -24,30 +21,12 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-/* ==============================
-   CATEGORY CONFIG
-============================== */
+/* ================= CACHE ================= */
 
-const VALID_CATEGORIES = [
-  "India",
-  "World",
-  "Business",
-  "Sports",
-  "Technology",
-  "Health",
-];
+let cache = {};
+const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
 
-/* ==============================
-   SIMPLE MEMORY CACHE
-============================== */
-
-let cachedNews = [];
-let lastFetchTime = 0;
-const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
-
-/* ==============================
-   FETCH + AI PROCESSING
-============================== */
+/* ================= FETCH NEWS ================= */
 
 async function fetchNews() {
   try {
@@ -58,7 +37,7 @@ async function fetchNews() {
       {
         params: {
           country: "in",
-          pageSize: 10,
+          pageSize: 5,
           apiKey: process.env.NEWS_API_KEY,
         },
       }
@@ -69,11 +48,10 @@ async function fetchNews() {
     for (const article of articles) {
       if (!article.title || !article.url) continue;
 
-      // 🔎 Check duplicate
+      // Check duplicate
       const existing = await db
         .collection("news")
         .where("title", "==", article.title)
-        .limit(1)
         .get();
 
       if (!existing.empty) {
@@ -81,26 +59,16 @@ async function fetchNews() {
         continue;
       }
 
-      // 🤖 AI Prompt
       const aiPrompt = `
 You are a professional news editor.
 
-Write:
-1) A factual summary (maximum 50 words).
-2) Detect correct category from:
-
-India – Indian politics, courts, governance
-World – International affairs
-Business – Economy, banking, corporate
-Sports – Cricket, football, tournaments
-Technology – AI, startups, gadgets
-Health – Medical, hospitals, research
+Write a factual summary in maximum 50 words.
+Detect correct category from:
+India, World, Business, Sports, Technology, Health
 
 Rules:
 - Under 50 words
 - Neutral tone
-- No emojis
-- No opinions
 - Return ONLY valid JSON
 
 Format:
@@ -132,91 +100,107 @@ ${article.description || article.content || article.title}
           }
         );
 
-        const aiText = aiResponse.data.choices[0].message.content;
-
-        const parsed = JSON.parse(aiText);
+        const parsed = JSON.parse(
+          aiResponse.data.choices[0].message.content
+        );
 
         aiSummary = parsed.summary;
-
-        // ✅ Category validation
-        if (VALID_CATEGORIES.includes(parsed.category)) {
-          aiCategory = parsed.category;
-        } else {
-          aiCategory = "India";
-        }
+        aiCategory = parsed.category;
       } catch (err) {
         console.log("AI failed. Skipping article.");
         continue;
       }
 
-      // 💾 Save to Firestore
       await db.collection("news").add({
         title: article.title,
         summary: aiSummary,
         category: aiCategory,
-        image: article.urlToImage || "",
-        source: article.source?.name || "",
+        source: article.source.name,
         sourceUrl: article.url,
-        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        image: article.urlToImage || "",
+        timestamp: new Date(article.publishedAt || Date.now()),
       });
 
       console.log("Saved:", article.title);
     }
 
-    lastFetchTime = Date.now();
     console.log("News fetch completed.");
   } catch (error) {
-    console.error("Fetch error:", error.message);
+    console.error("Error fetching news:", error.message);
   }
 }
 
-/* ==============================
-   API ROUTE
-============================== */
+/* ================= ROUTES ================= */
+
+app.get("/", (req, res) => {
+  res.send("ProIndian News Server is running 🚀");
+});
+
+/* ================= GET NEWS (FILTER + PAGINATION + CACHE) ================= */
 
 app.get("/news", async (req, res) => {
   try {
+    const { category, limit = 10, lastDocId } = req.query;
+
+    const cacheKey = `${category || "All"}-${limit}-${lastDocId || "first"}`;
     const now = Date.now();
 
-    // Use cache if valid
-    if (cachedNews.length > 0 && now - lastFetchTime < CACHE_DURATION) {
-      return res.json(cachedNews);
+    // Serve from cache
+    if (
+      cache[cacheKey] &&
+      now - cache[cacheKey].timestamp < CACHE_DURATION
+    ) {
+      return res.json(cache[cacheKey].data);
     }
 
-    const snapshot = await db
+    let query = db
       .collection("news")
-      .orderBy("timestamp", "desc")
-      .limit(50)
-      .get();
+      .orderBy("timestamp", "desc");
+
+    // Category filter
+    if (category && category !== "All") {
+      query = query.where("category", "==", category);
+    }
+
+    query = query.limit(Number(limit));
+
+    // Pagination
+    if (lastDocId) {
+      const lastDoc = await db.collection("news").doc(lastDocId).get();
+      if (lastDoc.exists) {
+        query = query.startAfter(lastDoc);
+      }
+    }
+
+    const snapshot = await query.get();
 
     const news = snapshot.docs.map((doc) => ({
       id: doc.id,
       ...doc.data(),
     }));
 
-    cachedNews = news;
-    lastFetchTime = now;
+    // Save to cache
+    cache[cacheKey] = {
+      data: news,
+      timestamp: now,
+    };
 
     res.json(news);
   } catch (error) {
-    console.error("API error:", error.message);
-    res.status(500).json({ error: "Failed to load news" });
+    console.error("Error fetching news:", error.message);
+    res.status(500).json({ error: "Failed to fetch news" });
   }
 });
 
-/* ==============================
-   CRON JOB
-============================== */
+/* ================= CRON ================= */
 
 // Every 30 minutes
 cron.schedule("*/30 * * * *", fetchNews);
 
-// Run once at startup
+// Run once on start
 fetchNews();
 
-/* ==============================
-   SERVER START
-============================== */
+/* ================= SERVER ================= */
 
 const PORT = process.env.PORT || 10000;
 
