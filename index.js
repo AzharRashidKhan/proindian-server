@@ -21,6 +21,44 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
+/* ================= AI CATEGORY DETECTION ================= */
+
+async function detectCategory(text) {
+  try {
+    const response = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        model: "gpt-3.5-turbo",
+        messages: [
+          {
+            role: "user",
+            content: `
+Classify this news into ONE category only:
+India, World, Business, Sports, Health, Technology
+
+Return only the category word.
+
+News:
+${text}
+`,
+          },
+        ],
+        temperature: 0,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    return response.data.choices[0].message.content.trim();
+  } catch {
+    return "India";
+  }
+}
+
 /* ================= FETCH NEWS ================= */
 
 async function fetchNews() {
@@ -48,15 +86,20 @@ async function fetchNews() {
 
       if (!duplicate.empty) continue;
 
+      const category = await detectCategory(
+        article.description || article.title
+      );
+
       await db.collection("news").add({
         title: article.title,
         summary: article.description || "",
-        category: "India", // can upgrade to AI categorization later
+        category,
         source: article.source.name,
         sourceUrl: article.url,
         image: article.urlToImage || "",
         likes: 0,
         views: 0,
+        likedBy: [],
         timestamp: admin.firestore.FieldValue.serverTimestamp(),
       });
     }
@@ -84,8 +127,7 @@ app.get("/news", async (req, res) => {
     query = query.orderBy("timestamp", "desc").limit(limit);
 
     if (lastTimestamp) {
-      const cursorDate = new Date(lastTimestamp);
-      query = query.startAfter(cursorDate);
+      query = query.startAfter(new Date(lastTimestamp));
     }
 
     const snapshot = await query.get();
@@ -95,26 +137,22 @@ app.get("/news", async (req, res) => {
       ...doc.data(),
     }));
 
-    let newLastTimestamp = null;
+    let newCursor = null;
 
     if (articles.length > 0) {
       const last = articles[articles.length - 1].timestamp;
-      if (last && last.toDate) {
-        newLastTimestamp = last.toDate().toISOString();
+      if (last?.toDate) {
+        newCursor = last.toDate().toISOString();
       }
     }
 
-    res.json({
-      articles,
-      lastTimestamp: newLastTimestamp,
-    });
-  } catch (err) {
-    console.error(err);
+    res.json({ articles, lastTimestamp: newCursor });
+  } catch {
     res.status(500).json({ error: "Pagination failed" });
   }
 });
 
-/* ================= TRENDING (SMART 24H DECAY) ================= */
+/* ================= INSHORTS-STYLE TRENDING ================= */
 
 app.get("/news/trending", async (req, res) => {
   try {
@@ -131,7 +169,6 @@ app.get("/news/trending", async (req, res) => {
       ...doc.data(),
     }));
 
-    // 🔥 Smart time-decay formula
     news = news.map(article => {
       const likes = article.likes || 0;
       const views = article.views || 0;
@@ -143,29 +180,44 @@ app.get("/news/trending", async (req, res) => {
             : Date.now())) /
         (1000 * 60 * 60);
 
-      const score =
-        (likes * 5 + views * 1) / Math.pow(ageHours + 2, 1.5);
+      // Fresh-first formula like real apps
+      const freshnessBoost = Math.max(24 - ageHours, 0);
 
-      return {
-        ...article,
-        trendingScore: score,
-      };
+      const score =
+        freshnessBoost * 5 +
+        likes * 3 +
+        views * 1;
+
+      return { ...article, trendingScore: score };
     });
 
     news.sort((a, b) => b.trendingScore - a.trendingScore);
 
     res.json(news.slice(0, 20));
-  } catch (err) {
+  } catch {
     res.status(500).json({ error: "Trending failed" });
   }
 });
 
-/* ================= LIKE ================= */
+/* ================= LIKE WITH DUPLICATE PROTECTION ================= */
 
 app.post("/news/:id/like", async (req, res) => {
   try {
-    await db.collection("news").doc(req.params.id).update({
+    const { userId } = req.body;
+    const docRef = db.collection("news").doc(req.params.id);
+    const doc = await docRef.get();
+
+    if (!doc.exists) return res.status(404).json({ error: "Not found" });
+
+    const data = doc.data();
+
+    if (data.likedBy.includes(userId)) {
+      return res.json({ success: false, message: "Already liked" });
+    }
+
+    await docRef.update({
       likes: admin.firestore.FieldValue.increment(1),
+      likedBy: admin.firestore.FieldValue.arrayUnion(userId),
     });
 
     res.json({ success: true });
@@ -174,7 +226,7 @@ app.post("/news/:id/like", async (req, res) => {
   }
 });
 
-/* ================= VIEW ================= */
+/* ================= VIEW TRACKING ================= */
 
 app.post("/news/:id/view", async (req, res) => {
   try {
@@ -188,21 +240,12 @@ app.post("/news/:id/view", async (req, res) => {
   }
 });
 
-/* ================= HEALTH CHECK ================= */
-
-app.get("/", (req, res) => {
-  res.send("ProIndian Server Running 🚀");
-});
-
 /* ================= CRON ================= */
 
 cron.schedule("*/30 * * * *", fetchNews);
 fetchNews();
 
-/* ================= SERVER ================= */
-
 const PORT = process.env.PORT || 10000;
-
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
