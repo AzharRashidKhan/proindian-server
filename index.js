@@ -21,103 +21,45 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-/* ================= CACHE ================= */
-
-let cache = {};
-const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
-
 /* ================= FETCH NEWS ================= */
 
 async function fetchNews() {
   try {
     console.log("Fetching news...");
 
-    const newsResponse = await axios.get(
+    const response = await axios.get(
       "https://newsapi.org/v2/top-headlines",
       {
         params: {
           country: "in",
-          pageSize: 5,
+          pageSize: 10,
           apiKey: process.env.NEWS_API_KEY,
         },
       }
     );
 
-    const articles = newsResponse.data.articles;
+    const articles = response.data.articles;
 
     for (const article of articles) {
       if (!article.title || !article.url) continue;
 
-      // Check duplicate
-      const existing = await db
+      const duplicate = await db
         .collection("news")
         .where("title", "==", article.title)
+        .limit(1)
         .get();
 
-      if (!existing.empty) {
-        console.log("Skipped duplicate:", article.title);
-        continue;
-      }
-
-      const aiPrompt = `
-You are a professional news editor.
-
-Write a factual summary in maximum 50 words.
-Detect correct category from:
-India, World, Business, Sports, Technology, Health
-
-Rules:
-- Under 50 words
-- Neutral tone
-- Return ONLY valid JSON
-
-Format:
-{
-  "summary": "text",
-  "category": "India"
-}
-
-Article:
-${article.description || article.content || article.title}
-`;
-
-      let aiSummary = "";
-      let aiCategory = "India";
-
-      try {
-        const aiResponse = await axios.post(
-          "https://api.openai.com/v1/chat/completions",
-          {
-            model: "gpt-3.5-turbo",
-            messages: [{ role: "user", content: aiPrompt }],
-            temperature: 0.3,
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-              "Content-Type": "application/json",
-            },
-          }
-        );
-
-        const parsed = JSON.parse(
-          aiResponse.data.choices[0].message.content
-        );
-
-        aiSummary = parsed.summary;
-        aiCategory = parsed.category;
-      } catch (err) {
-        console.log("AI failed. Skipping article.");
-        continue;
-      }
+      if (!duplicate.empty) continue;
 
       await db.collection("news").add({
         title: article.title,
-        summary: aiSummary,
-        category: aiCategory,
+        summary: article.description || "",
+        category: "India",
         source: article.source.name,
         sourceUrl: article.url,
         image: article.urlToImage || "",
+        likes: 0,
+        views: 0,
         timestamp: new Date(article.publishedAt || Date.now()),
       });
 
@@ -126,78 +68,156 @@ ${article.description || article.content || article.title}
 
     console.log("News fetch completed.");
   } catch (error) {
-    console.error("Error fetching news:", error.message);
+    console.error("Fetch error:", error.message);
   }
 }
 
-/* ================= ROUTES ================= */
+/* ================= HEALTH CHECK ================= */
 
 app.get("/", (req, res) => {
-  res.send("ProIndian News Server is running 🚀");
+  res.send("ProIndian Server Running 🚀");
 });
 
-/* ================= GET NEWS (FILTER + PAGINATION + CACHE) ================= */
+/* ================= ALL NEWS (PAGINATED) ================= */
 
 app.get("/news", async (req, res) => {
   try {
-    const { category, limit = 10, lastDocId } = req.query;
-
-    const cacheKey = `${category || "All"}-${limit}-${lastDocId || "first"}`;
-    const now = Date.now();
-
-    // Serve from cache
-    if (
-      cache[cacheKey] &&
-      now - cache[cacheKey].timestamp < CACHE_DURATION
-    ) {
-      return res.json(cache[cacheKey].data);
-    }
+    const limit = parseInt(req.query.limit) || 10;
+    const lastTimestamp = req.query.lastTimestamp;
 
     let query = db
       .collection("news")
-      .orderBy("timestamp", "desc");
+      .orderBy("timestamp", "desc")
+      .limit(limit);
 
-    // Category filter
-    if (category && category !== "All") {
-      query = query.where("category", "==", category);
-    }
-
-    query = query.limit(Number(limit));
-
-    // Pagination
-    if (lastDocId) {
-      const lastDoc = await db.collection("news").doc(lastDocId).get();
-      if (lastDoc.exists) {
-        query = query.startAfter(lastDoc);
-      }
+    if (lastTimestamp) {
+      query = db
+        .collection("news")
+        .orderBy("timestamp", "desc")
+        .startAfter(new Date(parseInt(lastTimestamp) * 1000))
+        .limit(limit);
     }
 
     const snapshot = await query.get();
 
-    const news = snapshot.docs.map((doc) => ({
+    const news = snapshot.docs.map(doc => ({
       id: doc.id,
       ...doc.data(),
     }));
 
-    // Save to cache
-    cache[cacheKey] = {
-      data: news,
-      timestamp: now,
-    };
+    res.json(news);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch news" });
+  }
+});
+
+/* ================= CATEGORY FILTER (PAGINATED) ================= */
+
+app.get("/news/category/:category", async (req, res) => {
+  try {
+    const category = req.params.category;
+    const limit = parseInt(req.query.limit) || 10;
+    const lastTimestamp = req.query.lastTimestamp;
+
+    let query = db
+      .collection("news")
+      .where("category", "==", category)
+      .orderBy("timestamp", "desc")
+      .limit(limit);
+
+    if (lastTimestamp) {
+      query = db
+        .collection("news")
+        .where("category", "==", category)
+        .orderBy("timestamp", "desc")
+        .startAfter(new Date(parseInt(lastTimestamp) * 1000))
+        .limit(limit);
+    }
+
+    const snapshot = await query.get();
+
+    const news = snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
 
     res.json(news);
-  } catch (error) {
-    console.error("Error fetching news:", error.message);
-    res.status(500).json({ error: "Failed to fetch news" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch category news" });
+  }
+});
+
+/* ================= 🔥 TRENDING (24 HOURS) ================= */
+
+app.get("/news/trending", async (req, res) => {
+  try {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    const snapshot = await db
+      .collection("news")
+      .where("timestamp", ">", yesterday)
+      .get();
+
+    let news = snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+
+    // Trending Score
+    news = news.map(article => ({
+      ...article,
+      trendingScore:
+        (article.likes || 0) * 3 +
+        (article.views || 0),
+    }));
+
+    news.sort((a, b) => b.trendingScore - a.trendingScore);
+
+    res.json(news.slice(0, 20));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch trending news" });
+  }
+});
+
+/* ================= LIKE SYSTEM ================= */
+
+app.post("/news/:id/like", async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    await db.collection("news").doc(id).update({
+      likes: admin.firestore.FieldValue.increment(1),
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "Like failed" });
+  }
+});
+
+/* ================= VIEW TRACKING ================= */
+
+app.post("/news/:id/view", async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    await db.collection("news").doc(id).update({
+      views: admin.firestore.FieldValue.increment(1),
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "View failed" });
   }
 });
 
 /* ================= CRON ================= */
 
-// Every 30 minutes
 cron.schedule("*/30 * * * *", fetchNews);
-
-// Run once on start
 fetchNews();
 
 /* ================= SERVER ================= */
