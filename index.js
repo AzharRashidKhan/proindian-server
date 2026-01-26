@@ -21,6 +21,11 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
+/* ================= CACHE ================= */
+
+let cache = {};
+const CACHE_DURATION = 2 * 60 * 1000;
+
 /* ================= FETCH NEWS ================= */
 
 async function fetchNews() {
@@ -38,15 +43,12 @@ async function fetchNews() {
       }
     );
 
-    const articles = response.data.articles;
-
-    for (const article of articles) {
+    for (const article of response.data.articles) {
       if (!article.title || !article.url) continue;
 
       const duplicate = await db
         .collection("news")
         .where("title", "==", article.title)
-        .limit(1)
         .get();
 
       if (!duplicate.empty) continue;
@@ -60,45 +62,34 @@ async function fetchNews() {
         image: article.urlToImage || "",
         likes: 0,
         views: 0,
-        timestamp: new Date(article.publishedAt || Date.now()),
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
       });
-
-      console.log("Saved:", article.title);
     }
 
     console.log("News fetch completed.");
-  } catch (error) {
-    console.error("Fetch error:", error.message);
+  } catch (err) {
+    console.error("Fetch error:", err.message);
   }
 }
 
-/* ================= HEALTH CHECK ================= */
-
-app.get("/", (req, res) => {
-  res.send("ProIndian Server Running 🚀");
-});
-
-/* ================= ALL NEWS (PAGINATED) ================= */
+/* ================= PAGINATED NEWS ================= */
 
 app.get("/news", async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 10;
-    const lastTimestamp = req.query.lastTimestamp;
+    const { category, lastTimestamp } = req.query;
+    const limit = 10;
 
-    let query = db
-      .collection("news")
-      .orderBy("timestamp", "desc")
-      .limit(limit);
+    let query = db.collection("news").orderBy("timestamp", "desc");
 
-    if (lastTimestamp) {
-      query = db
-        .collection("news")
-        .orderBy("timestamp", "desc")
-        .startAfter(new Date(parseInt(lastTimestamp) * 1000))
-        .limit(limit);
+    if (category && category !== "All" && category !== "Trending") {
+      query = query.where("category", "==", category);
     }
 
-    const snapshot = await query.get();
+    if (lastTimestamp) {
+      query = query.startAfter(new Date(Number(lastTimestamp)));
+    }
+
+    const snapshot = await query.limit(limit).get();
 
     const news = snapshot.docs.map(doc => ({
       id: doc.id,
@@ -107,49 +98,11 @@ app.get("/news", async (req, res) => {
 
     res.json(news);
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: "Failed to fetch news" });
   }
 });
 
-/* ================= CATEGORY FILTER (PAGINATED) ================= */
-
-app.get("/news/category/:category", async (req, res) => {
-  try {
-    const category = req.params.category;
-    const limit = parseInt(req.query.limit) || 10;
-    const lastTimestamp = req.query.lastTimestamp;
-
-    let query = db
-      .collection("news")
-      .where("category", "==", category)
-      .orderBy("timestamp", "desc")
-      .limit(limit);
-
-    if (lastTimestamp) {
-      query = db
-        .collection("news")
-        .where("category", "==", category)
-        .orderBy("timestamp", "desc")
-        .startAfter(new Date(parseInt(lastTimestamp) * 1000))
-        .limit(limit);
-    }
-
-    const snapshot = await query.get();
-
-    const news = snapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
-
-    res.json(news);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to fetch category news" });
-  }
-});
-
-/* ================= 🔥 TRENDING (24 HOURS) ================= */
+/* ================= TRENDING (24 HOURS) ================= */
 
 app.get("/news/trending", async (req, res) => {
   try {
@@ -166,51 +119,46 @@ app.get("/news/trending", async (req, res) => {
       ...doc.data(),
     }));
 
-    // Trending Score
     news = news.map(article => ({
       ...article,
       trendingScore:
-        (article.likes || 0) * 3 +
-        (article.views || 0),
+        (article.likes || 0) * 4 +
+        (article.views || 0) -
+        ((Date.now() - new Date(article.timestamp).getTime()) / 10000000),
     }));
 
     news.sort((a, b) => b.trendingScore - a.trendingScore);
 
     res.json(news.slice(0, 20));
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to fetch trending news" });
+    res.status(500).json({ error: "Trending failed" });
   }
 });
 
-/* ================= LIKE SYSTEM ================= */
+/* ================= LIKE ================= */
 
 app.post("/news/:id/like", async (req, res) => {
   try {
-    const id = req.params.id;
-
-    await db.collection("news").doc(id).update({
+    await db.collection("news").doc(req.params.id).update({
       likes: admin.firestore.FieldValue.increment(1),
     });
 
     res.json({ success: true });
-  } catch (err) {
+  } catch {
     res.status(500).json({ error: "Like failed" });
   }
 });
 
-/* ================= VIEW TRACKING ================= */
+/* ================= VIEW ================= */
 
 app.post("/news/:id/view", async (req, res) => {
   try {
-    const id = req.params.id;
-
-    await db.collection("news").doc(id).update({
+    await db.collection("news").doc(req.params.id).update({
       views: admin.firestore.FieldValue.increment(1),
     });
 
     res.json({ success: true });
-  } catch (err) {
+  } catch {
     res.status(500).json({ error: "View failed" });
   }
 });
