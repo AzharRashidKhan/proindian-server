@@ -1,4 +1,5 @@
 require("dotenv").config();
+
 const express = require("express");
 const axios = require("axios");
 const cron = require("node-cron");
@@ -9,7 +10,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-/* ================= FIREBASE INIT ================= */
+/* ==============================
+   FIREBASE INITIALIZATION
+============================== */
 
 admin.initializeApp({
   credential: admin.credential.cert({
@@ -21,11 +24,30 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
+/* ==============================
+   CATEGORY CONFIG
+============================== */
+
+const VALID_CATEGORIES = [
+  "India",
+  "World",
+  "Business",
+  "Sports",
+  "Technology",
+  "Health",
+];
+
+/* ==============================
+   SIMPLE MEMORY CACHE
+============================== */
+
 let cachedNews = [];
 let lastFetchTime = 0;
-const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
 
-/* ================= FETCH NEWS ================= */
+/* ==============================
+   FETCH + AI PROCESSING
+============================== */
 
 async function fetchNews() {
   try {
@@ -36,7 +58,7 @@ async function fetchNews() {
       {
         params: {
           country: "in",
-          pageSize: 5,
+          pageSize: 10,
           apiKey: process.env.NEWS_API_KEY,
         },
       }
@@ -47,10 +69,11 @@ async function fetchNews() {
     for (const article of articles) {
       if (!article.title || !article.url) continue;
 
-      // Check duplicate by title
+      // 🔎 Check duplicate
       const existing = await db
         .collection("news")
         .where("title", "==", article.title)
+        .limit(1)
         .get();
 
       if (!existing.empty) {
@@ -58,16 +81,25 @@ async function fetchNews() {
         continue;
       }
 
+      // 🤖 AI Prompt
       const aiPrompt = `
 You are a professional news editor.
 
-Write a factual summary in maximum 50 words.
-Detect correct category from:
-India, World, Business, Sports, Technology
+Write:
+1) A factual summary (maximum 50 words).
+2) Detect correct category from:
+
+India – Indian politics, courts, governance
+World – International affairs
+Business – Economy, banking, corporate
+Sports – Cricket, football, tournaments
+Technology – AI, startups, gadgets
+Health – Medical, hospitals, research
 
 Rules:
 - Under 50 words
 - Neutral tone
+- No emojis
 - No opinions
 - Return ONLY valid JSON
 
@@ -103,70 +135,90 @@ ${article.description || article.content || article.title}
         const aiText = aiResponse.data.choices[0].message.content;
 
         const parsed = JSON.parse(aiText);
+
         aiSummary = parsed.summary;
-        aiCategory = parsed.category;
-      } catch (error) {
+
+        // ✅ Category validation
+        if (VALID_CATEGORIES.includes(parsed.category)) {
+          aiCategory = parsed.category;
+        } else {
+          aiCategory = "India";
+        }
+      } catch (err) {
         console.log("AI failed. Skipping article.");
         continue;
       }
 
+      // 💾 Save to Firestore
       await db.collection("news").add({
         title: article.title,
         summary: aiSummary,
         category: aiCategory,
-        source: article.source.name,
-        sourceUrl: article.url,
         image: article.urlToImage || "",
-        timestamp: new Date(article.publishedAt || Date.now()),
+        source: article.source?.name || "",
+        sourceUrl: article.url,
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
       });
 
-      console.log("Saved with AI summary:", article.title);
+      console.log("Saved:", article.title);
     }
 
+    lastFetchTime = Date.now();
     console.log("News fetch completed.");
   } catch (error) {
-    console.error("Error fetching news:", error.message);
+    console.error("Fetch error:", error.message);
   }
 }
 
-/* ================= ROUTES ================= */
+/* ==============================
+   API ROUTE
+============================== */
 
-app.get("/", (req, res) => {
-  res.send("ProIndian News Server is running 🚀");
-});
-
-/* ================= CRON ================= */
-
-// Every 30 minutes
-cron.schedule("*/30 * * * *", fetchNews);
-
-// Run once on start
-fetchNews();
-
-/* ================= SERVER ================= */
-
-const PORT = process.env.PORT || 10000;
-
-// 🔥 GET Latest News API
 app.get("/news", async (req, res) => {
   try {
+    const now = Date.now();
+
+    // Use cache if valid
+    if (cachedNews.length > 0 && now - lastFetchTime < CACHE_DURATION) {
+      return res.json(cachedNews);
+    }
+
     const snapshot = await db
       .collection("news")
       .orderBy("timestamp", "desc")
-      .limit(20)
+      .limit(50)
       .get();
 
-    const news = snapshot.docs.map(doc => ({
+    const news = snapshot.docs.map((doc) => ({
       id: doc.id,
       ...doc.data(),
     }));
 
-     res.json(news);
-   } catch (error) {
-     console.error("Error fetching news:", error);
-     res.status(500).json({ error: "Failed to fetch news" });
-    }
-   });
+    cachedNews = news;
+    lastFetchTime = now;
+
+    res.json(news);
+  } catch (error) {
+    console.error("API error:", error.message);
+    res.status(500).json({ error: "Failed to load news" });
+  }
+});
+
+/* ==============================
+   CRON JOB
+============================== */
+
+// Every 30 minutes
+cron.schedule("*/30 * * * *", fetchNews);
+
+// Run once at startup
+fetchNews();
+
+/* ==============================
+   SERVER START
+============================== */
+
+const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
