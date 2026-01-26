@@ -21,6 +21,10 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
+let cachedNews = [];
+let lastFetchTime = 0;
+const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+
 /* ================= FETCH NEWS ================= */
 
 async function fetchNews() {
