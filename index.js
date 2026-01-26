@@ -5,23 +5,30 @@ const cron = require("node-cron");
 const cors = require("cors");
 const admin = require("firebase-admin");
 
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+/* ================= FIREBASE INIT ================= */
+
 admin.initializeApp({
   credential: admin.credential.cert({
     projectId: process.env.FIREBASE_PROJECT_ID,
     clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+    privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
   }),
 });
 
 const db = admin.firestore();
 
-// 🔥 Fetch News Function
+/* ================= FETCH NEWS ================= */
+
 async function fetchNews() {
   try {
     console.log("Fetching news...");
 
     const newsResponse = await axios.get(
-      `https://newsapi.org/v2/top-headlines`,
+      "https://newsapi.org/v2/top-headlines",
       {
         params: {
           country: "in",
@@ -36,7 +43,7 @@ async function fetchNews() {
     for (const article of articles) {
       if (!article.title || !article.url) continue;
 
-      // 🔎 Check duplicate
+      // Check duplicate by title
       const existing = await db
         .collection("news")
         .where("title", "==", article.title)
@@ -47,26 +54,22 @@ async function fetchNews() {
         continue;
       }
 
-      // 🤖 AI Prompt
       const aiPrompt = `
 You are a professional news editor.
 
-Your task:
-1. Write a crisp, factual summary in maximum 50 words.
-2. Detect the correct category from this list only:
+Write a factual summary in maximum 50 words.
+Detect correct category from:
 India, World, Business, Sports, Technology
 
 Rules:
-- Strictly under 50 words
+- Under 50 words
 - Neutral tone
-- No emojis
 - No opinions
-- Do not repeat headline
 - Return ONLY valid JSON
 
 Format:
 {
-  "summary": "your summary here",
+  "summary": "text",
   "category": "India"
 }
 
@@ -95,20 +98,14 @@ ${article.description || article.content || article.title}
 
         const aiText = aiResponse.data.choices[0].message.content;
 
-        try {
-          const parsed = JSON.parse(aiText);
-          aiSummary = parsed.summary;
-          aiCategory = parsed.category;
-        } catch (err) {
-          console.log("AI JSON parse error. Skipping article.");
-          continue;
-        }
+        const parsed = JSON.parse(aiText);
+        aiSummary = parsed.summary;
+        aiCategory = parsed.category;
       } catch (error) {
-        console.log("AI request failed. Skipping article.");
+        console.log("AI failed. Skipping article.");
         continue;
       }
 
-      // 💾 Save to Firestore
       await db.collection("news").add({
         title: article.title,
         summary: aiSummary,
@@ -128,13 +125,23 @@ ${article.description || article.content || article.title}
   }
 }
 
-// 🚀 Run Every 30 Minutes
+/* ================= ROUTES ================= */
+
+app.get("/", (req, res) => {
+  res.send("ProIndian News Server is running 🚀");
+});
+
+/* ================= CRON ================= */
+
+// Every 30 minutes
 cron.schedule("*/30 * * * *", fetchNews);
 
-// Run once on server start
+// Run once on start
 fetchNews();
 
-const PORT = process.env.PORT || 5000;
+/* ================= SERVER ================= */
+
+const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
