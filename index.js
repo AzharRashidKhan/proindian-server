@@ -143,6 +143,27 @@ fetchNews();
 
 const PORT = process.env.PORT || 10000;
 
+// 🔥 GET Latest News API
+app.get("/news", async (req, res) => {
+  try {
+    const snapshot = await db
+      .collection("news")
+      .orderBy("timestamp", "desc")
+      .limit(20)
+      .get();
+
+    const news = snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+
+     res.json(news);
+   } catch (error) {
+     console.error("Error fetching news:", error);
+     res.status(500).json({ error: "Failed to fetch news" });
+    }
+   });
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
