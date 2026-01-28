@@ -10,7 +10,16 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-/* ================= FIREBASE INIT ================= */
+/* ================= SAFE FIREBASE INIT ================= */
+
+if (
+  !process.env.FIREBASE_PROJECT_ID ||
+  !process.env.FIREBASE_CLIENT_EMAIL ||
+  !process.env.FIREBASE_PRIVATE_KEY
+) {
+  console.error("❌ Missing Firebase environment variables");
+  process.exit(1);
+}
 
 admin.initializeApp({
   credential: admin.credential.cert({
@@ -22,13 +31,33 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-/* ================= RATE LIMITING ================= */
+/* ================= RATE LIMIT ================= */
 
 const interactionLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 200,
+  max: 300,
   standardHeaders: true,
   legacyHeaders: false,
+});
+
+/* ================= DEVICE REGISTER ================= */
+
+app.post("/register-device", async (req, res) => {
+  try {
+    const { token, categories, platform } = req.body;
+    if (!token) return res.status(400).json({ error: "Token required" });
+
+    await db.collection("devices").doc(token).set({
+      token,
+      categories: categories || [],
+      platform: platform || "web",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    res.json({ success: true });
+  } catch {
+    res.status(500).json({ error: "Device registration failed" });
+  }
 });
 
 /* ================= AI CATEGORY ================= */
@@ -43,7 +72,7 @@ async function detectCategory(text) {
           {
             role: "user",
             content: `
-Classify into ONE:
+Classify into ONE category only:
 India, World, Business, Sports, Health, Technology
 
 Return only the word.
@@ -68,7 +97,7 @@ ${text}
   }
 }
 
-/* ================= FETCH NEWS ================= */
+/* ================= FETCH NEWS (CRON) ================= */
 
 async function fetchNews() {
   try {
@@ -142,7 +171,7 @@ app.get("/news", async (req, res) => {
 
     const snapshot = await query.get();
 
-    const articles = snapshot.docs.map(doc => ({
+    const articles = snapshot.docs.map((doc) => ({
       id: doc.id,
       ...doc.data(),
     }));
@@ -157,12 +186,12 @@ app.get("/news", async (req, res) => {
     }
 
     res.json({ articles, lastTimestamp: newCursor });
-  } catch (err) {
+  } catch {
     res.status(500).json({ error: "Pagination failed" });
   }
 });
 
-/* ================= SMART TRENDING ================= */
+/* ================= SMART TRENDING (Inshorts-style) ================= */
 
 app.get("/news/trending", async (req, res) => {
   try {
@@ -174,12 +203,12 @@ app.get("/news/trending", async (req, res) => {
       .where("timestamp", ">", yesterday)
       .get();
 
-    let news = snapshot.docs.map(doc => ({
+    let news = snapshot.docs.map((doc) => ({
       id: doc.id,
       ...doc.data(),
     }));
 
-    news = news.map(article => {
+    news = news.map((article) => {
       const likes = article.likes || 0;
       const views = article.views || 0;
 
@@ -210,12 +239,13 @@ app.get("/news/trending", async (req, res) => {
 app.post("/news/:id/like", interactionLimiter, async (req, res) => {
   try {
     const { deviceId } = req.body;
-    if (!deviceId) return res.status(400).json({ error: "Device ID required" });
+    if (!deviceId)
+      return res.status(400).json({ error: "Device ID required" });
 
     const docRef = db.collection("news").doc(req.params.id);
     const doc = await docRef.get();
-
-    if (!doc.exists) return res.status(404).json({ error: "Not found" });
+    if (!doc.exists)
+      return res.status(404).json({ error: "Not found" });
 
     const data = doc.data();
     const likedBy = data.likedBy || [];
@@ -240,12 +270,13 @@ app.post("/news/:id/like", interactionLimiter, async (req, res) => {
 app.post("/news/:id/view", interactionLimiter, async (req, res) => {
   try {
     const { deviceId } = req.body;
-    if (!deviceId) return res.status(400).json({ error: "Device ID required" });
+    if (!deviceId)
+      return res.status(400).json({ error: "Device ID required" });
 
     const docRef = db.collection("news").doc(req.params.id);
     const doc = await docRef.get();
-
-    if (!doc.exists) return res.status(404).json({ error: "Not found" });
+    if (!doc.exists)
+      return res.status(404).json({ error: "Not found" });
 
     const data = doc.data();
     const viewedBy = data.viewedBy || [];
@@ -274,5 +305,5 @@ fetchNews();
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
