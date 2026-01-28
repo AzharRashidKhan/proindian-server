@@ -4,6 +4,7 @@ const axios = require("axios");
 const cron = require("node-cron");
 const cors = require("cors");
 const admin = require("firebase-admin");
+const rateLimit = require("express-rate-limit");
 
 const app = express();
 app.use(cors());
@@ -21,7 +22,16 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-/* ================= AI CATEGORY DETECTION ================= */
+/* ================= RATE LIMITING ================= */
+
+const interactionLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+/* ================= AI CATEGORY ================= */
 
 async function detectCategory(text) {
   try {
@@ -33,10 +43,10 @@ async function detectCategory(text) {
           {
             role: "user",
             content: `
-Classify this news into ONE category only:
+Classify into ONE:
 India, World, Business, Sports, Health, Technology
 
-Return only the category word.
+Return only the word.
 
 News:
 ${text}
@@ -48,7 +58,6 @@ ${text}
       {
         headers: {
           Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-          "Content-Type": "application/json",
         },
       }
     );
@@ -100,6 +109,7 @@ async function fetchNews() {
         likes: 0,
         views: 0,
         likedBy: [],
+        viewedBy: [],
         timestamp: admin.firestore.FieldValue.serverTimestamp(),
       });
     }
@@ -147,12 +157,12 @@ app.get("/news", async (req, res) => {
     }
 
     res.json({ articles, lastTimestamp: newCursor });
-  } catch {
+  } catch (err) {
     res.status(500).json({ error: "Pagination failed" });
   }
 });
 
-/* ================= INSHORTS-STYLE TRENDING ================= */
+/* ================= SMART TRENDING ================= */
 
 app.get("/news/trending", async (req, res) => {
   try {
@@ -180,13 +190,9 @@ app.get("/news/trending", async (req, res) => {
             : Date.now())) /
         (1000 * 60 * 60);
 
-      // Fresh-first formula like real apps
       const freshnessBoost = Math.max(24 - ageHours, 0);
 
-      const score =
-        freshnessBoost * 5 +
-        likes * 3 +
-        views * 1;
+      const score = freshnessBoost * 5 + likes * 3 + views;
 
       return { ...article, trendingScore: score };
     });
@@ -199,25 +205,28 @@ app.get("/news/trending", async (req, res) => {
   }
 });
 
-/* ================= LIKE WITH DUPLICATE PROTECTION ================= */
+/* ================= LIKE (DEVICE PROTECTED) ================= */
 
-app.post("/news/:id/like", async (req, res) => {
+app.post("/news/:id/like", interactionLimiter, async (req, res) => {
   try {
-    const { userId } = req.body;
+    const { deviceId } = req.body;
+    if (!deviceId) return res.status(400).json({ error: "Device ID required" });
+
     const docRef = db.collection("news").doc(req.params.id);
     const doc = await docRef.get();
 
     if (!doc.exists) return res.status(404).json({ error: "Not found" });
 
     const data = doc.data();
+    const likedBy = data.likedBy || [];
 
-    if (data.likedBy.includes(userId)) {
+    if (likedBy.includes(deviceId)) {
       return res.json({ success: false, message: "Already liked" });
     }
 
     await docRef.update({
       likes: admin.firestore.FieldValue.increment(1),
-      likedBy: admin.firestore.FieldValue.arrayUnion(userId),
+      likedBy: admin.firestore.FieldValue.arrayUnion(deviceId),
     });
 
     res.json({ success: true });
@@ -226,12 +235,28 @@ app.post("/news/:id/like", async (req, res) => {
   }
 });
 
-/* ================= VIEW TRACKING ================= */
+/* ================= VIEW (DEVICE PROTECTED) ================= */
 
-app.post("/news/:id/view", async (req, res) => {
+app.post("/news/:id/view", interactionLimiter, async (req, res) => {
   try {
-    await db.collection("news").doc(req.params.id).update({
+    const { deviceId } = req.body;
+    if (!deviceId) return res.status(400).json({ error: "Device ID required" });
+
+    const docRef = db.collection("news").doc(req.params.id);
+    const doc = await docRef.get();
+
+    if (!doc.exists) return res.status(404).json({ error: "Not found" });
+
+    const data = doc.data();
+    const viewedBy = data.viewedBy || [];
+
+    if (viewedBy.includes(deviceId)) {
+      return res.json({ success: false });
+    }
+
+    await docRef.update({
       views: admin.firestore.FieldValue.increment(1),
+      viewedBy: admin.firestore.FieldValue.arrayUnion(deviceId),
     });
 
     res.json({ success: true });
@@ -244,6 +269,8 @@ app.post("/news/:id/view", async (req, res) => {
 
 cron.schedule("*/30 * * * *", fetchNews);
 fetchNews();
+
+/* ================= SERVER ================= */
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
