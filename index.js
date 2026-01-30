@@ -102,11 +102,9 @@ async function fetchNews() {
 
     for (const feedUrl of feeds) {
       const feed = await parser.parseURL(feedUrl);
-
-      console.log("Feed items count:", feed.items.length);
+      
 
       for (const item of feed.items.slice(0, 10)) {
-        console.log("Processing:", item.title);
         if (!item.title || !item.link) continue;
 
         const duplicate = await db
