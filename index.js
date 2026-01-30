@@ -1,12 +1,14 @@
 require("dotenv").config();
 const express = require("express");
-const axios = require("axios");
 const cron = require("node-cron");
 const cors = require("cors");
 const admin = require("firebase-admin");
 const rateLimit = require("express-rate-limit");
+const Parser = require("rss-parser");
 
+const parser = new Parser();
 const app = express();
+
 app.use(cors());
 app.use(express.json());
 
@@ -40,6 +42,32 @@ const interactionLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+/* ================= CATEGORY DETECTION (KEYWORDS) ================= */
+
+function detectCategoryFromKeywords(text) {
+  const lower = text.toLowerCase();
+
+  if (lower.match(/india|delhi|mumbai|modi|government|parliament/))
+    return "India";
+
+  if (lower.match(/usa|china|russia|uk|europe|world|international/))
+    return "World";
+
+  if (lower.match(/market|stock|rupee|economy|business|startup|finance/))
+    return "Business";
+
+  if (lower.match(/cricket|football|match|ipl|sports|tournament/))
+    return "Sports";
+
+  if (lower.match(/health|hospital|disease|covid|medical|doctor/))
+    return "Health";
+
+  if (lower.match(/ai|technology|tech|mobile|app|software|internet/))
+    return "Technology";
+
+  return "India";
+}
+
 /* ================= DEVICE REGISTER ================= */
 
 app.post("/register-device", async (req, res) => {
@@ -60,92 +88,55 @@ app.post("/register-device", async (req, res) => {
   }
 });
 
-/* ================= AI CATEGORY ================= */
-
-async function detectCategory(text) {
-  try {
-    const response = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        model: "gpt-3.5-turbo",
-        messages: [
-          {
-            role: "user",
-            content: `
-Classify into ONE category only:
-India, World, Business, Sports, Health, Technology
-
-Return only the word.
-
-News:
-${text}
-`,
-          },
-        ],
-        temperature: 0,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        },
-      }
-    );
-
-    return response.data.choices[0].message.content.trim();
-  } catch {
-    return "India";
-  }
-}
-
-/* ================= FETCH NEWS (CRON) ================= */
+/* ================= FETCH NEWS FROM RSS ================= */
 
 async function fetchNews() {
   try {
-    console.log("Fetching news...");
+    console.log("Fetching RSS news...");
 
-    const response = await axios.get(
-      "https://newsapi.org/v2/top-headlines",
-      {
-        params: {
-          country: "in",
-          pageSize: 10,
-          apiKey: process.env.NEWS_API_KEY,
-        },
+    const feeds = [
+      "https://timesofindia.indiatimes.com/rssfeedstopstories.cms",
+      "https://www.thehindu.com/news/national/feeder/default.rss",
+      "https://feeds.bbci.co.uk/news/rss.xml",
+    ];
+
+    for (const feedUrl of feeds) {
+      const feed = await parser.parseURL(feedUrl);
+
+      for (const item of feed.items.slice(0, 10)) {
+        if (!item.title || !item.link) continue;
+
+        const duplicate = await db
+          .collection("news")
+          .where("title", "==", item.title)
+          .get();
+
+        if (!duplicate.empty) continue;
+
+        const content =
+          (item.contentSnippet || "") + " " + item.title;
+
+        const category = detectCategoryFromKeywords(content);
+
+        await db.collection("news").add({
+          title: item.title,
+          summary: item.contentSnippet || "",
+          category,
+          source: feed.title || "News",
+          sourceUrl: item.link,
+          image: item.enclosure?.url || "",
+          likes: 0,
+          views: 0,
+          likedBy: [],
+          viewedBy: [],
+          timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        });
       }
-    );
-
-    for (const article of response.data.articles) {
-      if (!article.title || !article.url) continue;
-
-      const duplicate = await db
-        .collection("news")
-        .where("title", "==", article.title)
-        .get();
-
-      if (!duplicate.empty) continue;
-
-      const category = await detectCategory(
-        article.description || article.title
-      );
-
-      await db.collection("news").add({
-        title: article.title,
-        summary: article.description || "",
-        category,
-        source: article.source.name,
-        sourceUrl: article.url,
-        image: article.urlToImage || "",
-        likes: 0,
-        views: 0,
-        likedBy: [],
-        viewedBy: [],
-        timestamp: admin.firestore.FieldValue.serverTimestamp(),
-      });
     }
 
-    console.log("News fetch completed.");
+    console.log("RSS fetch completed.");
   } catch (err) {
-    console.error("Fetch error:", err.message);
+    console.error("RSS fetch error:", err.message);
   }
 }
 
@@ -191,7 +182,7 @@ app.get("/news", async (req, res) => {
   }
 });
 
-/* ================= SMART TRENDING (Inshorts-style) ================= */
+/* ================= TRENDING ================= */
 
 app.get("/news/trending", async (req, res) => {
   try {
@@ -234,7 +225,7 @@ app.get("/news/trending", async (req, res) => {
   }
 });
 
-/* ================= LIKE (DEVICE PROTECTED) ================= */
+/* ================= LIKE ================= */
 
 app.post("/news/:id/like", interactionLimiter, async (req, res) => {
   try {
@@ -265,7 +256,7 @@ app.post("/news/:id/like", interactionLimiter, async (req, res) => {
   }
 });
 
-/* ================= VIEW (DEVICE PROTECTED) ================= */
+/* ================= VIEW ================= */
 
 app.post("/news/:id/view", interactionLimiter, async (req, res) => {
   try {

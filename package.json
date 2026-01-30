@@ -17,6 +17,7 @@
     "express-rate-limit": "^8.2.1",
     "firebase-admin": "^13.6.0",
     "node-cron": "^4.2.1",
+    "rss-parser": "^3.13.0",
     "uuid": "^13.0.0"
   }
 }
