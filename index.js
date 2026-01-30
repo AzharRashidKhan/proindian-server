@@ -5,6 +5,7 @@ const cors = require("cors");
 const admin = require("firebase-admin");
 const rateLimit = require("express-rate-limit");
 const Parser = require("rss-parser");
+const axios = require("axios");
 
 const parser = new Parser();
 const app = express();
@@ -12,7 +13,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-/* ================= SAFE FIREBASE INIT ================= */
+/* ================= FIREBASE INIT ================= */
 
 if (
   !process.env.FIREBASE_PROJECT_ID ||
@@ -42,104 +43,251 @@ const interactionLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-/* ================= CATEGORY DETECTION (KEYWORDS) ================= */
+/* ================= CATEGORY RSS FEEDS ================= */
 
-function detectCategoryFromKeywords(text) {
-  const lower = text.toLowerCase();
+const feeds = {
+  India: [
+    "https://www.thehindu.com/news/national/feeder/default.rss",
+    "https://www.ndtv.com/rss/india",
+    "https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml",
+    "https://indianexpress.com/section/india/rss/",
+    "https://www.thequint.com/feed/india",
+  ],
+  World: [
+    "https://www.thehindu.com/news/international/feeder/default.rss",
+    "https://www.ndtv.com/rss/world",
+    "https://indianexpress.com/section/world/rss/",
+    "https://www.thequint.com/feed/world",
+  ],
+  Business: [
+    "https://www.thehindu.com/business/feeder/default.rss",
+    "https://www.ndtv.com/rss/business",
+    "https://www.hindustantimes.com/feeds/rss/business/rssfeed.xml",
+    "https://indianexpress.com/section/business/rss/",
+    "https://www.thequint.com/feed/business",
+  ],
+  Sports: [
+    "https://www.thehindu.com/sport/feeder/default.rss",
+    "https://www.ndtv.com/rss/sports",
+    "https://www.hindustantimes.com/feeds/rss/sports/rssfeed.xml",
+    "https://indianexpress.com/section/sports/rss/",
+    "https://www.thequint.com/feed/sports",
+  ],
+  Health: [
+    "https://www.thehindu.com/sci-tech/health/feeder/default.rss",
+    "https://www.ndtv.com/rss/health",
+    "https://www.hindustantimes.com/feeds/rss/lifestyle/health/rssfeed.xml",
+  ],
+  Technology: [
+    "https://www.thehindu.com/sci-tech/technology/feeder/default.rss",
+    "https://www.ndtv.com/rss/technology",
+    "https://indianexpress.com/section/technology/rss/",
+    "https://www.thequint.com/feed/tech-and-auto",
+  ],
+};
 
-  if (lower.match(/india|delhi|mumbai|modi|government|parliament/))
-    return "India";
+/* ================= BREAKING LOGIC ================= */
 
-  if (lower.match(/usa|china|russia|uk|europe|world|international/))
-    return "World";
-
-  if (lower.match(/market|stock|rupee|economy|business|startup|finance/))
-    return "Business";
-
-  if (lower.match(/cricket|football|match|ipl|sports|tournament/))
-    return "Sports";
-
-  if (lower.match(/health|hospital|disease|covid|medical|doctor/))
-    return "Health";
-
-  if (lower.match(/ai|technology|tech|mobile|app|software|internet/))
-    return "Technology";
-
-  return "India";
+function isBreaking(title) {
+  const t = title.toLowerCase();
+  return (
+    t.includes("breaking") ||
+    t.includes("live") ||
+    t.includes("just in") ||
+    t.includes("alert")
+  );
 }
 
-/* ================= DEVICE REGISTER ================= */
+/* ================= TITLE SIMILARITY ================= */
 
-app.post("/register-device", async (req, res) => {
+function normalizeTitle(title) {
+  return title
+    .toLowerCase()
+    .replace(/[^\w\s]/g, "")
+    .split(" ")
+    .filter(w => w.length > 3);
+}
+
+function similarity(a, b) {
+  const setA = new Set(a);
+  const setB = new Set(b);
+  const intersection = [...setA].filter(x => setB.has(x));
+  const union = new Set([...setA, ...setB]);
+  return intersection.length / union.size;
+}
+
+/* ================= IMAGE EXTRACTION ================= */
+
+async function extractImage(item) {
+  if (item.enclosure?.url) return item.enclosure.url;
+  if (item["media:content"]?.url) return item["media:content"].url;
+
   try {
-    const { token, categories, platform } = req.body;
-    if (!token) return res.status(400).json({ error: "Token required" });
+    const res = await axios.get(item.link, { timeout: 5000 });
+    const match = res.data.match(
+      /<meta property="og:image" content="([^"]+)"/
+    );
+    if (match) return match[1];
+  } catch {}
 
-    await db.collection("devices").doc(token).set({
-      token,
-      categories: categories || [],
-      platform: platform || "web",
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+  return "";
+}
 
-    res.json({ success: true });
-  } catch {
-    res.status(500).json({ error: "Device registration failed" });
-  }
-});
-
-/* ================= FETCH NEWS FROM RSS ================= */
+/* ================= FETCH NEWS ================= */
 
 async function fetchNews() {
   try {
     console.log("Fetching RSS news...");
 
-    const feeds = [
-      "https://timesofindia.indiatimes.com/rssfeedstopstories.cms",
-      "https://www.thehindu.com/news/national/feeder/default.rss",
-      "https://feeds.bbci.co.uk/news/rss.xml",
-    ];
+    const hoursWindow = 6;
+    const cutoff = new Date(Date.now() - hoursWindow * 3600000);
 
-    for (const feedUrl of feeds) {
-      const feed = await parser.parseURL(feedUrl);
-      
+    const recentSnap = await db
+      .collection("news")
+      .where("timestamp", ">", cutoff)
+      .get();
 
-      for (const item of feed.items.slice(0, 10)) {
-        if (!item.title || !item.link) continue;
+    const recent = recentSnap.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
 
-        const duplicate = await db
-          .collection("news")
-          .where("title", "==", item.title)
-          .get();
+    for (const category in feeds) {
+      for (const feedUrl of feeds[category]) {
+        try {
+          const feed = await parser.parseURL(feedUrl);
 
-        if (!duplicate.empty) continue;
+          for (const item of feed.items.slice(0, 10)) {
+            if (!item.title || !item.link) continue;
 
-        const content =
-          (item.contentSnippet || "") + " " + item.title;
+            const newWords = normalizeTitle(item.title);
+            let duplicate = null;
+            let highest = 0;
 
-        const category = detectCategoryFromKeywords(content);
+            for (const existing of recent) {
+              const existingWords = normalizeTitle(existing.title);
+              const score = similarity(newWords, existingWords);
 
-        await db.collection("news").add({
-          title: item.title,
-          summary: item.contentSnippet || "",
-          category,
-          source: feed.title || "News",
-          sourceUrl: item.link,
-          image: item.enclosure?.url || "",
-          likes: 0,
-          views: 0,
-          likedBy: [],
-          viewedBy: [],
-          timestamp: admin.firestore.FieldValue.serverTimestamp(),
-        });
+              if (score > 0.65 && score > highest) {
+                highest = score;
+                duplicate = existing;
+              }
+            }
+
+            const summary = item.contentSnippet || "";
+            const image = await extractImage(item);
+            const breaking = isBreaking(item.title);
+
+            if (duplicate) {
+              const docRef = db.collection("news").doc(duplicate.id);
+              const updates = {};
+
+              if (summary.length > (duplicate.summary || "").length)
+                updates.summary = summary;
+
+              if (!duplicate.image && image)
+                updates.image = image;
+
+              if (Object.keys(updates).length > 0)
+                await docRef.update(updates);
+
+              continue;
+            }
+
+            await db.collection("news").add({
+              title: item.title,
+              summary,
+              category,
+              source: feed.title || "News",
+              sourceUrl: item.link,
+              image,
+              breaking,
+              likes: 0,
+              views: 0,
+              likedBy: [],
+              viewedBy: [],
+              timestamp: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          }
+        } catch (err) {
+          console.log("Feed error:", feedUrl);
+        }
       }
     }
 
     console.log("RSS fetch completed.");
   } catch (err) {
-    console.error("RSS fetch error:", err.message);
+    console.error("Fetch error:", err.message);
   }
 }
+
+/* ================= AUTO DELETE 7 DAYS ================= */
+
+async function deleteOldNews() {
+  try {
+    const cutoff = new Date(Date.now() - 7 * 24 * 3600000);
+
+    const snap = await db
+      .collection("news")
+      .where("timestamp", "<", cutoff)
+      .get();
+
+    const batch = db.batch();
+    snap.docs.forEach(doc => batch.delete(doc.ref));
+    await batch.commit();
+
+    console.log("Deleted old news:", snap.size);
+  } catch (err) {
+    console.error("Delete error:", err.message);
+  }
+}
+
+/* ================= TRENDING ================= */
+
+app.get("/news/trending", async (req, res) => {
+  try {
+    const snap = await db
+      .collection("news")
+      .orderBy("timestamp", "desc")
+      .limit(100)
+      .get();
+
+    let news = snap.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+
+    news = news.map(article => {
+      const likes = article.likes || 0;
+      const views = article.views || 0;
+
+      const ageHours =
+        (Date.now() -
+          (article.timestamp?.toDate
+            ? article.timestamp.toDate().getTime()
+            : Date.now())) /
+        3600000;
+
+      const decay =
+        (likes * 4 + views * 1.5) /
+        Math.pow(ageHours + 2, 1.5);
+
+      const breakingBoost =
+        article.breaking && ageHours < 3 ? 20 : 0;
+
+      return {
+        ...article,
+        trendingScore: decay + breakingBoost,
+      };
+    });
+
+    news.sort((a, b) => b.trendingScore - a.trendingScore);
+
+    res.json(news.slice(0, 20));
+  } catch {
+    res.status(500).json({ error: "Trending failed" });
+  }
+});
 
 /* ================= PAGINATED NEWS ================= */
 
@@ -161,136 +309,32 @@ app.get("/news", async (req, res) => {
       query = query.startAfter(new Date(lastTimestamp));
     }
 
-    const snapshot = await query.get();
+    const snap = await query.get();
 
-    const articles = snapshot.docs.map((doc) => ({
+    const articles = snap.docs.map(doc => ({
       id: doc.id,
       ...doc.data(),
     }));
 
-    let newCursor = null;
+    let cursor = null;
 
     if (articles.length > 0) {
       const last = articles[articles.length - 1].timestamp;
-      if (last?.toDate) {
-        newCursor = last.toDate().toISOString();
-      }
+      if (last?.toDate)
+        cursor = last.toDate().toISOString();
     }
 
-    res.json({ articles, lastTimestamp: newCursor });
+    res.json({ articles, lastTimestamp: cursor });
   } catch {
     res.status(500).json({ error: "Pagination failed" });
-  }
-});
-
-/* ================= TRENDING ================= */
-
-app.get("/news/trending", async (req, res) => {
-  try {
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-
-    const snapshot = await db
-      .collection("news")
-      .where("timestamp", ">", yesterday)
-      .get();
-
-    let news = snapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
-
-    news = news.map((article) => {
-      const likes = article.likes || 0;
-      const views = article.views || 0;
-
-      const ageHours =
-        (Date.now() -
-          (article.timestamp?.toDate
-            ? article.timestamp.toDate().getTime()
-            : Date.now())) /
-        (1000 * 60 * 60);
-
-      const freshnessBoost = Math.max(24 - ageHours, 0);
-
-      const score = freshnessBoost * 5 + likes * 3 + views;
-
-      return { ...article, trendingScore: score };
-    });
-
-    news.sort((a, b) => b.trendingScore - a.trendingScore);
-
-    res.json(news.slice(0, 20));
-  } catch {
-    res.status(500).json({ error: "Trending failed" });
-  }
-});
-
-/* ================= LIKE ================= */
-
-app.post("/news/:id/like", interactionLimiter, async (req, res) => {
-  try {
-    const { deviceId } = req.body;
-    if (!deviceId)
-      return res.status(400).json({ error: "Device ID required" });
-
-    const docRef = db.collection("news").doc(req.params.id);
-    const doc = await docRef.get();
-    if (!doc.exists)
-      return res.status(404).json({ error: "Not found" });
-
-    const data = doc.data();
-    const likedBy = data.likedBy || [];
-
-    if (likedBy.includes(deviceId)) {
-      return res.json({ success: false, message: "Already liked" });
-    }
-
-    await docRef.update({
-      likes: admin.firestore.FieldValue.increment(1),
-      likedBy: admin.firestore.FieldValue.arrayUnion(deviceId),
-    });
-
-    res.json({ success: true });
-  } catch {
-    res.status(500).json({ error: "Like failed" });
-  }
-});
-
-/* ================= VIEW ================= */
-
-app.post("/news/:id/view", interactionLimiter, async (req, res) => {
-  try {
-    const { deviceId } = req.body;
-    if (!deviceId)
-      return res.status(400).json({ error: "Device ID required" });
-
-    const docRef = db.collection("news").doc(req.params.id);
-    const doc = await docRef.get();
-    if (!doc.exists)
-      return res.status(404).json({ error: "Not found" });
-
-    const data = doc.data();
-    const viewedBy = data.viewedBy || [];
-
-    if (viewedBy.includes(deviceId)) {
-      return res.json({ success: false });
-    }
-
-    await docRef.update({
-      views: admin.firestore.FieldValue.increment(1),
-      viewedBy: admin.firestore.FieldValue.arrayUnion(deviceId),
-    });
-
-    res.json({ success: true });
-  } catch {
-    res.status(500).json({ error: "View failed" });
   }
 });
 
 /* ================= CRON ================= */
 
 cron.schedule("*/30 * * * *", fetchNews);
+cron.schedule("0 3 * * *", deleteOldNews);
+
 fetchNews();
 
 /* ================= SERVER ================= */
