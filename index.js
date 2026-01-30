@@ -1,9 +1,10 @@
 require("dotenv").config();
 const express = require("express");
-const axios = require("axios");
 const cron = require("node-cron");
 const cors = require("cors");
 const admin = require("firebase-admin");
+const rateLimit = require("express-rate-limit");
+const axios = require("axios");
 
 const app = express();
 app.use(cors());
@@ -16,7 +17,7 @@ if (
   !process.env.FIREBASE_CLIENT_EMAIL ||
   !process.env.FIREBASE_PRIVATE_KEY
 ) {
-  console.error("Missing Firebase environment variables");
+  console.error("Missing Firebase env variables");
   process.exit(1);
 }
 
@@ -30,18 +31,25 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-/* ================= CATEGORY MAP ================= */
+/* ================= RATE LIMIT ================= */
 
-function mapCategory(apiCategory) {
-  if (!apiCategory) return "India";
+const interactionLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+});
 
-  const cat = apiCategory.toLowerCase();
+/* ================= CATEGORY MAPPING ================= */
 
+function mapCategory(newsDataCategory) {
+  if (!newsDataCategory) return "India";
+
+  const cat = newsDataCategory.toLowerCase();
+
+  if (cat.includes("world")) return "World";
   if (cat.includes("business")) return "Business";
   if (cat.includes("sports")) return "Sports";
   if (cat.includes("technology")) return "Technology";
   if (cat.includes("health")) return "Health";
-  if (cat.includes("world")) return "World";
 
   return "India";
 }
@@ -49,25 +57,31 @@ function mapCategory(apiCategory) {
 /* ================= BREAKING LOGIC ================= */
 
 function isBreaking(title) {
-  const lower = title.toLowerCase();
+  const t = title.toLowerCase();
   return (
-    lower.includes("breaking") ||
-    lower.includes("live") ||
-    lower.includes("just in") ||
-    lower.includes("alert")
+    t.includes("breaking") ||
+    t.includes("live") ||
+    t.includes("alert") ||
+    t.includes("just in")
   );
 }
 
-/* ================= DUPLICATE CHECK ================= */
+/* ================= TITLE SIMILARITY ================= */
 
-async function isDuplicate(title) {
-  const snapshot = await db
-    .collection("news")
-    .where("title", "==", title)
-    .limit(1)
-    .get();
+function normalizeTitle(title) {
+  return title
+    .toLowerCase()
+    .replace(/[^\w\s]/g, "")
+    .split(" ")
+    .filter((w) => w.length > 3);
+}
 
-  return !snapshot.empty;
+function similarity(a, b) {
+  const setA = new Set(a);
+  const setB = new Set(b);
+  const intersection = [...setA].filter((w) => setB.has(w));
+  const union = new Set([...setA, ...setB]);
+  return intersection.length / union.size;
 }
 
 /* ================= FETCH NEWS FROM NEWSDATA ================= */
@@ -80,75 +94,107 @@ async function fetchNews() {
       "https://newsdata.io/api/1/news",
       {
         params: {
-          apikey: process.env.NEWSDATA_API_KEY,
+          apikey: process.env.NEWS_DATA_API_KEY,
           country: "in",
           language: "en",
-          category:
-            "business,technology,health,world,sports",
-          image: 1, // only articles with images
+          category: "top,world,business,sports,technology,health",
         },
       }
     );
 
     const articles = response.data.results || [];
 
-    for (const article of articles) {
-      if (!article.title || !article.link) continue;
+    const hoursWindow = 6;
+    const cutoff = new Date(Date.now() - hoursWindow * 60 * 60 * 1000);
 
-      const duplicate = await isDuplicate(article.title);
-      if (duplicate) continue;
+    const recentSnapshot = await db
+      .collection("news")
+      .where("timestamp", ">", cutoff)
+      .get();
+
+    const recent = recentSnapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+
+    for (const item of articles) {
+      if (!item.title || !item.link) continue;
+
+      const newWords = normalizeTitle(item.title);
+      let duplicateDoc = null;
+      let highestSim = 0;
+
+      for (const existing of recent) {
+        const existingWords = normalizeTitle(existing.title);
+        const sim = similarity(newWords, existingWords);
+
+        if (sim > 0.65 && sim > highestSim) {
+          highestSim = sim;
+          duplicateDoc = existing;
+        }
+      }
+
+      const summary = item.description || "";
+      const image = item.image_url || "";
+      const category = mapCategory(item.category?.[0]);
+      const breaking = isBreaking(item.title);
+
+      if (duplicateDoc) {
+        const docRef = db.collection("news").doc(duplicateDoc.id);
+        const update = {};
+
+        if (summary.length > (duplicateDoc.summary || "").length) {
+          update.summary = summary;
+        }
+
+        if (!duplicateDoc.image && image) {
+          update.image = image;
+        }
+
+        if (Object.keys(update).length > 0) {
+          await docRef.update(update);
+        }
+
+        continue;
+      }
 
       await db.collection("news").add({
-        title: article.title,
-        summary: article.description || "",
-        category: mapCategory(
-          article.category?.[0]
-        ),
-        source: article.source_id || "News",
-        sourceUrl: article.link,
-        image: article.image_url || "",
-        breaking: isBreaking(article.title),
+        title: item.title,
+        summary,
+        category,
+        source: item.source_id || "News",
+        sourceUrl: item.link,
+        image,
+        breaking,
         likes: 0,
         views: 0,
         likedBy: [],
         viewedBy: [],
-        timestamp:
-          admin.firestore.FieldValue.serverTimestamp(),
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
       });
     }
 
     console.log("Fetch completed.");
   } catch (err) {
-    console.error(
-      "Fetch error:",
-      err.response?.data || err.message
-    );
+    console.error("Fetch error:", err.message);
   }
 }
 
-/* ================= AUTO DELETE (7 DAYS) ================= */
+/* ================= AUTO DELETE AFTER 7 DAYS ================= */
 
 async function deleteOldNews() {
-  try {
-    const sevenDaysAgo = new Date(
-      Date.now() - 7 * 24 * 60 * 60 * 1000
-    );
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
-    const snapshot = await db
-      .collection("news")
-      .where("timestamp", "<", sevenDaysAgo)
-      .get();
+  const snapshot = await db
+    .collection("news")
+    .where("timestamp", "<", sevenDaysAgo)
+    .get();
 
-    const batch = db.batch();
-    snapshot.docs.forEach((doc) =>
-      batch.delete(doc.ref)
-    );
-    await batch.commit();
+  const batch = db.batch();
+  snapshot.docs.forEach((doc) => batch.delete(doc.ref));
+  await batch.commit();
 
-    console.log("Old news deleted:", snapshot.size);
-  } catch (err) {
-    console.error("Delete error:", err.message);
-  }
+  console.log("Deleted old news:", snapshot.size);
 }
 
 /* ================= TRENDING ================= */
@@ -173,36 +219,28 @@ app.get("/news/trending", async (req, res) => {
       const ageHours =
         (Date.now() -
           (article.timestamp?.toDate
-            ? article.timestamp
-                .toDate()
-                .getTime()
+            ? article.timestamp.toDate().getTime()
             : Date.now())) /
         (1000 * 60 * 60);
 
-      const decay =
+      const decayScore =
         (likes * 4 + views * 1.5) /
-        Math.pow(ageHours + 2, 1.4);
+        Math.pow(ageHours + 2, 1.5);
 
       const breakingBoost =
-        article.breaking && ageHours < 3
-          ? 20
-          : 0;
+        article.breaking && ageHours < 3 ? 20 : 0;
 
       return {
         ...article,
-        trendingScore: decay + breakingBoost,
+        trendingScore: decayScore + breakingBoost,
       };
     });
 
-    news.sort(
-      (a, b) => b.trendingScore - a.trendingScore
-    );
+    news.sort((a, b) => b.trendingScore - a.trendingScore);
 
     res.json(news.slice(0, 20));
   } catch {
-    res
-      .status(500)
-      .json({ error: "Trending failed" });
+    res.status(500).json({ error: "Trending failed" });
   }
 });
 
@@ -217,53 +255,34 @@ app.get("/news", async (req, res) => {
     let query = db.collection("news");
 
     if (category && category !== "All") {
-      query = query.where(
-        "category",
-        "==",
-        category
-      );
+      query = query.where("category", "==", category);
     }
 
-    query = query
-      .orderBy("timestamp", "desc")
-      .limit(limit);
+    query = query.orderBy("timestamp", "desc").limit(limit);
 
     if (lastTimestamp) {
-      query = query.startAfter(
-        new Date(lastTimestamp)
-      );
+      query = query.startAfter(new Date(lastTimestamp));
     }
 
     const snapshot = await query.get();
 
-    const articles = snapshot.docs.map(
-      (doc) => ({
-        id: doc.id,
-        ...doc.data(),
-      })
-    );
+    const articles = snapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
 
     let newCursor = null;
 
     if (articles.length > 0) {
-      const last =
-        articles[articles.length - 1]
-          .timestamp;
+      const last = articles[articles.length - 1].timestamp;
       if (last?.toDate) {
-        newCursor = last
-          .toDate()
-          .toISOString();
+        newCursor = last.toDate().toISOString();
       }
     }
 
-    res.json({
-      articles,
-      lastTimestamp: newCursor,
-    });
+    res.json({ articles, lastTimestamp: newCursor });
   } catch {
-    res
-      .status(500)
-      .json({ error: "Pagination failed" });
+    res.status(500).json({ error: "Pagination failed" });
   }
 });
 
