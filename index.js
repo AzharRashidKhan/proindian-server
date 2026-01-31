@@ -38,6 +38,27 @@ const interactionLimiter = rateLimit({
   max: 300,
 });
 
+/* ================= CLEAN + TRIM SUMMARY ================= */
+
+function cleanAndTrimSummary(text, maxWords = 100) {
+  if (!text) return "";
+
+  let cleaned = text.replace(/\s+/g, " ").trim();
+  cleaned = cleaned.replace(/\.\.\.+$/, "");
+
+  const words = cleaned.split(" ");
+  if (words.length <= maxWords) return cleaned;
+
+  const trimmed = words.slice(0, maxWords).join(" ");
+
+  const lastPeriod = trimmed.lastIndexOf(".");
+  if (lastPeriod > 60) {
+    return trimmed.slice(0, lastPeriod + 1);
+  }
+
+  return trimmed + ".";
+}
+
 /* ================= CATEGORY MAPPING ================= */
 
 function mapCategory(newsDataCategory) {
@@ -66,7 +87,7 @@ function isBreaking(title) {
   );
 }
 
-/* ================= TITLE SIMILARITY ================= */
+/* ================= DUPLICATE DETECTION ================= */
 
 function normalizeTitle(title) {
   return title
@@ -84,7 +105,7 @@ function similarity(a, b) {
   return intersection.length / union.size;
 }
 
-/* ================= FETCH NEWS FROM NEWSDATA ================= */
+/* ================= FETCH FROM NEWSDATA ================= */
 
 async function fetchNews() {
   try {
@@ -134,7 +155,7 @@ async function fetchNews() {
         }
       }
 
-      const summary = item.description || "";
+      const summary = cleanAndTrimSummary(item.description, 100);
       const image = item.image_url || "";
       const category = mapCategory(item.category?.[0]);
       const breaking = isBreaking(item.title);
