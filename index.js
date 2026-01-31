@@ -230,6 +230,34 @@ async function deleteOldNews() {
   console.log("Deleted old news:", snapshot.size);
 }
 
+/* ================= CLEAN OLD SUMMARIES ================= */
+
+async function cleanExistingSummaries() {
+  console.log("Cleaning existing summaries...");
+
+  const snapshot = await db.collection("news").get();
+
+  const batch = db.batch();
+  let count = 0;
+
+  snapshot.docs.forEach((doc) => {
+    const data = doc.data();
+    const trimmed = cleanAndTrimSummary(data.summary, 100);
+
+    if (trimmed !== data.summary) {
+      batch.update(doc.ref, { summary: trimmed });
+      count++;
+    }
+  });
+
+  if (count > 0) {
+    await batch.commit();
+  }
+
+  console.log("Cleaned articles:", count);
+}
+
+
 /* ================= TRENDING ================= */
 
 app.get("/news/trending", async (req, res) => {
@@ -325,6 +353,7 @@ cron.schedule("*/30 * * * *", fetchNews);
 cron.schedule("0 3 * * *", deleteOldNews);
 
 fetchNews();
+cleanExistingSummaries();
 
 /* ================= SERVER ================= */
 
