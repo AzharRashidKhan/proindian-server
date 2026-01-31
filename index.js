@@ -365,7 +365,7 @@ app.get("/news", async (req, res) => {
 
 /* ================= CRON ================= */
 
-cron.schedule("*/30 * * * *", fetchNews);
+cron.schedule("*/45 * * * *", fetchNews);
 cron.schedule("0 3 * * *", deleteOldNews);
 
 fetchNews();
