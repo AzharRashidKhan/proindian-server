@@ -38,37 +38,45 @@ const interactionLimiter = rateLimit({
   max: 300,
 });
 
-/* ================= CLEAN + STRICT TRIM SUMMARY ================= */
+/* ================= PROFESSIONAL SUMMARY CLEANER ================= */
 
-function cleanAndTrimSummary(text, maxWords = 90) {
+function cleanAndTrimSummary(text, minWords = 80, maxWords = 110) {
   if (!text) return "";
 
   // Remove URLs
   text = text.replace(/https?:\/\/\S+/g, "");
 
-  // Remove excessive whitespace
+  // Remove Twitter handles
+  text = text.replace(/@\w+/g, "");
+
+  // Remove brackets [...]
+  text = text.replace(/\[.*?\]/g, "");
+
+  // Remove "Also Read" sections
+  text = text.split("Also Read")[0];
+
+  // Normalize whitespace
   text = text.replace(/\s+/g, " ").trim();
 
-  // Remove trailing ...
-  text = text.replace(/\.\.\.+$/, "");
+  // Split into sentences
+  const sentences = text.match(/[^\.!\?]+[\.!\?]+/g);
+  if (!sentences) return "";
 
-  const words = text.split(" ").slice(0, maxWords);
-  let trimmed = words.join(" ");
+  let finalText = "";
+  let wordCount = 0;
 
-  // Find proper sentence ending
-  const lastPeriod = trimmed.lastIndexOf(".");
-  const lastQuestion = trimmed.lastIndexOf("?");
-  const lastExclaim = trimmed.lastIndexOf("!");
+  for (const sentence of sentences) {
+    const words = sentence.trim().split(" ").length;
 
-  const lastStop = Math.max(lastPeriod, lastQuestion, lastExclaim);
+    if (wordCount + words > maxWords) break;
 
-  if (lastStop > 40) {
-    trimmed = trimmed.slice(0, lastStop + 1);
-  } else {
-    trimmed += ".";
+    finalText += sentence.trim() + " ";
+    wordCount += words;
+
+    if (wordCount >= minWords) break;
   }
 
-  return trimmed;
+  return finalText.trim();
 }
 
 /* ================= CATEGORY MAPPING ================= */
@@ -167,7 +175,7 @@ async function fetchNews() {
         }
       }
 
-      const summary = cleanAndTrimSummary(item.description, 90);
+      const summary = cleanAndTrimSummary(item.description, 80, 110);
       const image = item.image_url || "";
       const category = mapCategory(item.category?.[0]);
       const breaking = isBreaking(item.title);
@@ -213,7 +221,7 @@ async function fetchNews() {
   }
 }
 
-/* ================= AUTO DELETE AFTER 7 DAYS ================= */
+/* ================= DELETE OLD NEWS ================= */
 
 async function deleteOldNews() {
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
@@ -233,16 +241,15 @@ async function deleteOldNews() {
 /* ================= CLEAN OLD SUMMARIES ================= */
 
 async function cleanExistingSummaries() {
-  console.log("Cleaning existing summaries...");
+  console.log("Cleaning old summaries...");
 
   const snapshot = await db.collection("news").get();
-
   const batch = db.batch();
   let count = 0;
 
   snapshot.docs.forEach((doc) => {
     const data = doc.data();
-    const trimmed = cleanAndTrimSummary(data.summary, 100);
+    const trimmed = cleanAndTrimSummary(data.summary, 80, 110);
 
     if (trimmed !== data.summary) {
       batch.update(doc.ref, { summary: trimmed });
@@ -250,62 +257,12 @@ async function cleanExistingSummaries() {
     }
   });
 
-  if (count > 0) {
-    await batch.commit();
-  }
+  if (count > 0) await batch.commit();
 
-  console.log("Cleaned articles:", count);
+  console.log("Cleaned:", count);
 }
 
-
-/* ================= TRENDING ================= */
-
-app.get("/news/trending", async (req, res) => {
-  try {
-    const snapshot = await db
-      .collection("news")
-      .orderBy("timestamp", "desc")
-      .limit(100)
-      .get();
-
-    let news = snapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
-
-    news = news.map((article) => {
-      const likes = article.likes || 0;
-      const views = article.views || 0;
-
-      const ageHours =
-        (Date.now() -
-          (article.timestamp?.toDate
-            ? article.timestamp.toDate().getTime()
-            : Date.now())) /
-        (1000 * 60 * 60);
-
-      const decayScore =
-        (likes * 4 + views * 1.5) /
-        Math.pow(ageHours + 2, 1.5);
-
-      const breakingBoost =
-        article.breaking && ageHours < 3 ? 20 : 0;
-
-      return {
-        ...article,
-        trendingScore: decayScore + breakingBoost,
-      };
-    });
-
-    news.sort((a, b) => b.trendingScore - a.trendingScore);
-
-    res.json(news.slice(0, 20));
-  } catch {
-    res.status(500).json({ error: "Trending failed" });
-  }
-});
-
-/* ================= PAGINATED NEWS ================= */
+/* ================= PAGINATION ================= */
 
 app.get("/news", async (req, res) => {
   try {
