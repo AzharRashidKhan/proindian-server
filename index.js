@@ -31,34 +31,31 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-/* ================= RATE LIMIT ================= */
-
-const interactionLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 300,
-});
-
-/* ================= PROFESSIONAL SUMMARY CLEANER ================= */
+/* ================= CLEAN + SMART TRIM SUMMARY ================= */
 
 function cleanAndTrimSummary(text, minWords = 80, maxWords = 110) {
   if (!text) return "";
 
-  // Remove URLs
+  // Remove URLs completely
   text = text.replace(/https?:\/\/\S+/g, "");
 
-  // Remove Twitter handles
-  text = text.replace(/@\w+/g, "");
+  // Remove twitter blocks
+  text = text.replace(/pic\.twitter\.com\S*/g, "");
+  text = text.replace(/—.*?(\.|\n)/g, "");
 
-  // Remove brackets [...]
+  // Remove brackets content
   text = text.replace(/\[.*?\]/g, "");
 
-  // Remove "Also Read" sections
+  // Remove Also Read sections
   text = text.split("Also Read")[0];
 
-  // Normalize whitespace
+  // Protect decimal numbers like 2.5, 102.4
+  text = text.replace(/(\d)\.(\d)/g, "$1_DECIMAL_$2");
+
+  // Normalize spaces
   text = text.replace(/\s+/g, " ").trim();
 
-  // Split into sentences
+  // Split sentences safely
   const sentences = text.match(/[^\.!\?]+[\.!\?]+/g);
   if (!sentences) return "";
 
@@ -66,11 +63,12 @@ function cleanAndTrimSummary(text, minWords = 80, maxWords = 110) {
   let wordCount = 0;
 
   for (const sentence of sentences) {
-    const words = sentence.trim().split(" ").length;
+    const cleanSentence = sentence.replace(/_DECIMAL_/g, ".");
+    const words = cleanSentence.trim().split(" ").length;
 
     if (wordCount + words > maxWords) break;
 
-    finalText += sentence.trim() + " ";
+    finalText += cleanSentence.trim() + " ";
     wordCount += words;
 
     if (wordCount >= minWords) break;
@@ -79,7 +77,7 @@ function cleanAndTrimSummary(text, minWords = 80, maxWords = 110) {
   return finalText.trim();
 }
 
-/* ================= CATEGORY MAPPING ================= */
+/* ================= CATEGORY ================= */
 
 function mapCategory(newsDataCategory) {
   if (!newsDataCategory) return "India";
@@ -95,7 +93,7 @@ function mapCategory(newsDataCategory) {
   return "India";
 }
 
-/* ================= BREAKING LOGIC ================= */
+/* ================= BREAKING ================= */
 
 function isBreaking(title) {
   const t = title.toLowerCase();
@@ -107,7 +105,7 @@ function isBreaking(title) {
   );
 }
 
-/* ================= DUPLICATE DETECTION ================= */
+/* ================= DUPLICATE ================= */
 
 function normalizeTitle(title) {
   return title
@@ -125,7 +123,7 @@ function similarity(a, b) {
   return intersection.length / union.size;
 }
 
-/* ================= FETCH FROM NEWSDATA ================= */
+/* ================= FETCH ================= */
 
 async function fetchNews() {
   try {
@@ -175,10 +173,12 @@ async function fetchNews() {
         }
       }
 
-      const summary = cleanAndTrimSummary(item.description, 80, 110);
+      const summary = cleanAndTrimSummary(item.description);
       const image = item.image_url || "";
       const category = mapCategory(item.category?.[0]);
       const breaking = isBreaking(item.title);
+
+      if (!summary) continue;
 
       if (duplicateDoc) {
         const docRef = db.collection("news").doc(duplicateDoc.id);
@@ -221,27 +221,10 @@ async function fetchNews() {
   }
 }
 
-/* ================= DELETE OLD NEWS ================= */
-
-async function deleteOldNews() {
-  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-
-  const snapshot = await db
-    .collection("news")
-    .where("timestamp", "<", sevenDaysAgo)
-    .get();
-
-  const batch = db.batch();
-  snapshot.docs.forEach((doc) => batch.delete(doc.ref));
-  await batch.commit();
-
-  console.log("Deleted old news:", snapshot.size);
-}
-
-/* ================= CLEAN OLD SUMMARIES ================= */
+/* ================= CLEAN OLD ARTICLES ================= */
 
 async function cleanExistingSummaries() {
-  console.log("Cleaning old summaries...");
+  console.log("Re-cleaning old summaries...");
 
   const snapshot = await db.collection("news").get();
   const batch = db.batch();
@@ -249,65 +232,59 @@ async function cleanExistingSummaries() {
 
   snapshot.docs.forEach((doc) => {
     const data = doc.data();
-    const trimmed = cleanAndTrimSummary(data.summary, 80, 110);
+    const cleaned = cleanAndTrimSummary(data.summary);
 
-    if (trimmed !== data.summary) {
-      batch.update(doc.ref, { summary: trimmed });
+    if (cleaned && cleaned !== data.summary) {
+      batch.update(doc.ref, { summary: cleaned });
       count++;
     }
   });
 
   if (count > 0) await batch.commit();
-
-  console.log("Cleaned:", count);
+  console.log("Updated:", count);
 }
 
-/* ================= PAGINATION ================= */
+/* ================= ROUTES ================= */
 
 app.get("/news", async (req, res) => {
-  try {
-    const limit = parseInt(req.query.limit) || 10;
-    const category = req.query.category;
-    const lastTimestamp = req.query.lastTimestamp;
+  const limit = parseInt(req.query.limit) || 10;
+  const category = req.query.category;
+  const lastTimestamp = req.query.lastTimestamp;
 
-    let query = db.collection("news");
+  let query = db.collection("news");
 
-    if (category && category !== "All") {
-      query = query.where("category", "==", category);
-    }
-
-    query = query.orderBy("timestamp", "desc").limit(limit);
-
-    if (lastTimestamp) {
-      query = query.startAfter(new Date(lastTimestamp));
-    }
-
-    const snapshot = await query.get();
-
-    const articles = snapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
-
-    let newCursor = null;
-
-    if (articles.length > 0) {
-      const last = articles[articles.length - 1].timestamp;
-      if (last?.toDate) {
-        newCursor = last.toDate().toISOString();
-      }
-    }
-
-    res.json({ articles, lastTimestamp: newCursor });
-  } catch {
-    res.status(500).json({ error: "Pagination failed" });
+  if (category && category !== "All") {
+    query = query.where("category", "==", category);
   }
+
+  query = query.orderBy("timestamp", "desc").limit(limit);
+
+  if (lastTimestamp) {
+    query = query.startAfter(new Date(lastTimestamp));
+  }
+
+  const snapshot = await query.get();
+
+  const articles = snapshot.docs.map((doc) => ({
+    id: doc.id,
+    ...doc.data(),
+  }));
+
+  let newCursor = null;
+
+  if (articles.length > 0) {
+    const last = articles[articles.length - 1].timestamp;
+    if (last?.toDate) {
+      newCursor = last.toDate().toISOString();
+    }
+  }
+
+  res.json({ articles, lastTimestamp: newCursor });
 });
 
 /* ================= CRON ================= */
 
 cron.schedule("*/30 * * * *", fetchNews);
-cron.schedule("0 3 * * *", deleteOldNews);
 
 fetchNews();
 cleanExistingSummaries();
