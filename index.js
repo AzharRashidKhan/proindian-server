@@ -160,7 +160,7 @@ async function fetchNews() {
           apikey: process.env.NEWSDATA_API_KEY,
           country: "in",
           language: "en",
-          category: "top,world,business,sports,technology,health",
+          category: "world,business,sports,technology,health",
         },
       }
     );
