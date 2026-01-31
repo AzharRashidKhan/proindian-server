@@ -241,7 +241,11 @@ async function fetchNews() {
 
     console.log("Fetch completed.");
   } catch (err) {
-    console.error("Fetch error:", err.message);
+    if (err.response) {
+      console.error("NewsData Error:", err.response.data);
+    } else {
+      console.error("Fetch error:", err.message);
+    }
   }
 }
 
