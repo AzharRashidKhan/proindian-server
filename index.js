@@ -157,7 +157,7 @@ async function fetchNews() {
       "https://newsdata.io/api/1/news",
       {
         params: {
-          apikey: process.env.NEWS_DATA_API_KEY,
+          apikey: process.env.NEWSDATA_API_KEY,
           country: "in",
           language: "en",
           category: "top,world,business,sports,technology,health",
