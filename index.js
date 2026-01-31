@@ -38,25 +38,37 @@ const interactionLimiter = rateLimit({
   max: 300,
 });
 
-/* ================= CLEAN + TRIM SUMMARY ================= */
+/* ================= CLEAN + STRICT TRIM SUMMARY ================= */
 
-function cleanAndTrimSummary(text, maxWords = 100) {
+function cleanAndTrimSummary(text, maxWords = 90) {
   if (!text) return "";
 
-  let cleaned = text.replace(/\s+/g, " ").trim();
-  cleaned = cleaned.replace(/\.\.\.+$/, "");
+  // Remove URLs
+  text = text.replace(/https?:\/\/\S+/g, "");
 
-  const words = cleaned.split(" ");
-  if (words.length <= maxWords) return cleaned;
+  // Remove excessive whitespace
+  text = text.replace(/\s+/g, " ").trim();
 
-  const trimmed = words.slice(0, maxWords).join(" ");
+  // Remove trailing ...
+  text = text.replace(/\.\.\.+$/, "");
 
+  const words = text.split(" ").slice(0, maxWords);
+  let trimmed = words.join(" ");
+
+  // Find proper sentence ending
   const lastPeriod = trimmed.lastIndexOf(".");
-  if (lastPeriod > 60) {
-    return trimmed.slice(0, lastPeriod + 1);
+  const lastQuestion = trimmed.lastIndexOf("?");
+  const lastExclaim = trimmed.lastIndexOf("!");
+
+  const lastStop = Math.max(lastPeriod, lastQuestion, lastExclaim);
+
+  if (lastStop > 40) {
+    trimmed = trimmed.slice(0, lastStop + 1);
+  } else {
+    trimmed += ".";
   }
 
-  return trimmed + ".";
+  return trimmed;
 }
 
 /* ================= CATEGORY MAPPING ================= */
@@ -155,7 +167,7 @@ async function fetchNews() {
         }
       }
 
-      const summary = cleanAndTrimSummary(item.description, 100);
+      const summary = cleanAndTrimSummary(item.description, 90);
       const image = item.image_url || "";
       const category = mapCategory(item.category?.[0]);
       const breaking = isBreaking(item.title);
