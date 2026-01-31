@@ -272,6 +272,55 @@ async function cleanExistingSummaries() {
   console.log("Updated:", count);
 }
 
+/* ================= TRENDING ================= */
+
+app.get("/news/trending", async (req, res) => {
+  try {
+    const snapshot = await db
+      .collection("news")
+      .orderBy("timestamp", "desc")
+      .limit(100)
+      .get();
+
+    let news = snapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+
+    news = news.map((article) => {
+      const likes = article.likes || 0;
+      const views = article.views || 0;
+
+      const ageHours =
+        (Date.now() -
+          (article.timestamp?.toDate
+            ? article.timestamp.toDate().getTime()
+            : Date.now())) /
+        (1000 * 60 * 60);
+
+      const decayScore =
+        (likes * 4 + views * 1.5) /
+        Math.pow(ageHours + 2, 1.5);
+
+      const breakingBoost =
+        article.breaking && ageHours < 3 ? 20 : 0;
+
+      return {
+        ...article,
+        trendingScore: decayScore + breakingBoost,
+      };
+    });
+
+    news.sort((a, b) => b.trendingScore - a.trendingScore);
+
+    res.json(news.slice(0, 20));
+  } catch (err) {
+    console.error("Trending error:", err.message);
+    res.status(500).json({ error: "Trending failed" });
+  }
+});
+
+
 /* ================= ROUTES ================= */
 
 app.get("/news", async (req, res) => {
