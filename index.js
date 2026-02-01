@@ -39,7 +39,7 @@ app.post("/register-token", async (req, res) => {
     await db.collection("fcmTokens").doc(token).set({
       token,
       language,
-      interests,
+      interests: interests || [],
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
@@ -63,11 +63,11 @@ async function sendBreakingPush(articleData, articleId) {
     const tokens = snapshot.docs.map((doc) => doc.data().token);
 
     if (tokens.length === 0) {
-      console.log("No users for this push");
+      console.log("No matching users for this push");
       return;
     }
 
-    await admin.messaging().sendEachForMulticast({
+    const response = await admin.messaging().sendEachForMulticast({
       tokens,
       notification: {
         title: "🚨 Breaking News",
@@ -78,7 +78,7 @@ async function sendBreakingPush(articleData, articleId) {
       },
     });
 
-    console.log("Push sent to", tokens.length, "users");
+    console.log("Push sent:", response.successCount);
   } catch (err) {
     console.error("Push error:", err.message);
   }
@@ -256,37 +256,12 @@ app.post("/news/:id/view", async (req, res) => {
   }
 });
 
-/* ================= TRENDING ================= */
-
-app.get("/news/trending", async (req, res) => {
-  try {
-    const language = req.query.language || "en";
-
-    const snapshot = await db
-      .collection("news")
-      .where("language", "==", language)
-      .orderBy("timestamp", "desc")
-      .limit(20)
-      .get();
-
-    const news = snapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
-
-    res.json(news);
-  } catch {
-    res.status(500).json({ error: "Trending failed" });
-  }
-});
-
 /* ================= NEWS ================= */
 
 app.get("/news", async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 10;
     const category = req.query.category;
-    const lastTimestamp = req.query.lastTimestamp;
     const language = req.query.language || "en";
 
     let query = db.collection("news").where("language", "==", language);
@@ -296,10 +271,6 @@ app.get("/news", async (req, res) => {
     }
 
     query = query.orderBy("timestamp", "desc").limit(limit);
-
-    if (lastTimestamp) {
-      query = query.startAfter(new Date(lastTimestamp));
-    }
 
     const snapshot = await query.get();
 
