@@ -266,6 +266,55 @@ app.get("/news", async (req, res) => {
   }
 });
 
+app.post("/news/:id/like", async (req, res) => {
+  try {
+    const { deviceId } = req.body;
+    const articleId = req.params.id;
+
+    const docRef = db.collection("news").doc(articleId);
+    const doc = await docRef.get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ success: false });
+    }
+
+    const data = doc.data();
+    const likedBy = data.likedBy || [];
+
+    if (!likedBy.includes(deviceId)) {
+      await docRef.update({
+        likes: admin.firestore.FieldValue.increment(1),
+        likedBy: admin.firestore.FieldValue.arrayUnion(deviceId),
+      });
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false });
+  }
+});
+
+app.post("/news/:id/view", async (req, res) => {
+  try {
+    const articleId = req.params.id;
+
+    const docRef = db.collection("news").doc(articleId);
+    const doc = await docRef.get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ success: false });
+    }
+
+    await docRef.update({
+      views: admin.firestore.FieldValue.increment(1),
+    });
+
+    res.json({ success: true });
+  } catch {
+    res.status(500).json({ success: false });
+  }
+});
+
 /* ================= CRON ================= */
 
 cron.schedule("*/45 * * * *", fetchNews);
