@@ -30,6 +30,60 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
+/* ================= REGISTER FCM TOKEN ================= */
+
+app.post("/register-token", async (req, res) => {
+  try {
+    const { token, language, interests } = req.body;
+
+    await db.collection("fcmTokens").doc(token).set({
+      token,
+      language,
+      interests,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Token save error:", err.message);
+    res.status(500).json({ success: false });
+  }
+});
+
+/* ================= SEND BREAKING PUSH ================= */
+
+async function sendBreakingPush(articleData, articleId) {
+  try {
+    const snapshot = await db
+      .collection("fcmTokens")
+      .where("language", "==", articleData.language)
+      .where("interests", "array-contains", articleData.category)
+      .get();
+
+    const tokens = snapshot.docs.map((doc) => doc.data().token);
+
+    if (tokens.length === 0) {
+      console.log("No users for this push");
+      return;
+    }
+
+    await admin.messaging().sendEachForMulticast({
+      tokens,
+      notification: {
+        title: "🚨 Breaking News",
+        body: articleData.title,
+      },
+      data: {
+        articleId,
+      },
+    });
+
+    console.log("Push sent to", tokens.length, "users");
+  } catch (err) {
+    console.error("Push error:", err.message);
+  }
+}
+
 /* ================= SUMMARY CLEANER ================= */
 
 function cleanAndTrimSummary(text, minWords = 80, maxWords = 110) {
@@ -139,7 +193,6 @@ async function fetchNewsByLanguage(lang) {
       const summary = cleanAndTrimSummary(item.description);
       if (!summary) continue;
 
-      // Prevent duplicates by checking sourceUrl
       const existing = await db
         .collection("news")
         .where("sourceUrl", "==", item.link)
@@ -148,30 +201,40 @@ async function fetchNewsByLanguage(lang) {
 
       if (!existing.empty) continue;
 
-      await db.collection("news").add({
+      const category = mapCategory(item.category?.[0]);
+      const breaking = isBreaking(item.title);
+
+      const docRef = await db.collection("news").add({
         title: item.title,
         summary,
-        category: mapCategory(item.category?.[0]),
+        category,
         language: lang,
         source: item.source_id || "News",
         sourceUrl: item.link,
         image: item.image_url || "",
-        breaking: isBreaking(item.title),
+        breaking,
         likes: 0,
         views: 0,
         likedBy: [],
         viewedBy: [],
         timestamp: admin.firestore.FieldValue.serverTimestamp(),
       });
+
+      if (breaking) {
+        await sendBreakingPush(
+          {
+            title: item.title,
+            category,
+            language: lang,
+          },
+          docRef.id
+        );
+      }
     }
 
     console.log(`${lang} news fetch completed`);
   } catch (err) {
-    if (err.response) {
-      console.error("NewsData Error:", err.response.data);
-    } else {
-      console.error("Fetch error:", err.message);
-    }
+    console.error("Fetch error:", err.message);
   }
 }
 
@@ -180,19 +243,16 @@ async function fetchNews() {
   await fetchNewsByLanguage("hi");
 }
 
-/* ================= VIEW TRACKING ================= */
+/* ================= VIEW ================= */
 
 app.post("/news/:id/view", async (req, res) => {
   try {
-    const id = req.params.id;
-
-    await db.collection("news").doc(id).update({
+    await db.collection("news").doc(req.params.id).update({
       views: admin.firestore.FieldValue.increment(1),
     });
-
     res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: "View update failed" });
+  } catch {
+    res.status(500).json({ success: false });
   }
 });
 
@@ -215,12 +275,12 @@ app.get("/news/trending", async (req, res) => {
     }));
 
     res.json(news);
-  } catch (err) {
+  } catch {
     res.status(500).json({ error: "Trending failed" });
   }
 });
 
-/* ================= NEWS ROUTE ================= */
+/* ================= NEWS ================= */
 
 app.get("/news", async (req, res) => {
   try {
@@ -229,9 +289,7 @@ app.get("/news", async (req, res) => {
     const lastTimestamp = req.query.lastTimestamp;
     const language = req.query.language || "en";
 
-    let query = db
-      .collection("news")
-      .where("language", "==", language);
+    let query = db.collection("news").where("language", "==", language);
 
     if (category && category !== "All") {
       query = query.where("category", "==", category);
@@ -250,36 +308,23 @@ app.get("/news", async (req, res) => {
       ...doc.data(),
     }));
 
-    let newCursor = null;
-
-    if (articles.length > 0) {
-      const last = articles[articles.length - 1].timestamp;
-      if (last?.toDate) {
-        newCursor = last.toDate().toISOString();
-      }
-    }
-
-    res.json({ articles, lastTimestamp: newCursor });
-  } catch (err) {
-    console.error(err);
+    res.json({ articles });
+  } catch {
     res.status(500).json({ error: "Pagination failed" });
   }
 });
 
+/* ================= LIKE ================= */
+
 app.post("/news/:id/like", async (req, res) => {
   try {
     const { deviceId } = req.body;
-    const articleId = req.params.id;
-
-    const docRef = db.collection("news").doc(articleId);
+    const docRef = db.collection("news").doc(req.params.id);
     const doc = await docRef.get();
 
-    if (!doc.exists) {
-      return res.status(404).json({ success: false });
-    }
+    if (!doc.exists) return res.status(404).json({ success: false });
 
-    const data = doc.data();
-    const likedBy = data.likedBy || [];
+    const likedBy = doc.data().likedBy || [];
 
     if (!likedBy.includes(deviceId)) {
       await docRef.update({
@@ -287,27 +332,6 @@ app.post("/news/:id/like", async (req, res) => {
         likedBy: admin.firestore.FieldValue.arrayUnion(deviceId),
       });
     }
-
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ success: false });
-  }
-});
-
-app.post("/news/:id/view", async (req, res) => {
-  try {
-    const articleId = req.params.id;
-
-    const docRef = db.collection("news").doc(articleId);
-    const doc = await docRef.get();
-
-    if (!doc.exists) {
-      return res.status(404).json({ success: false });
-    }
-
-    await docRef.update({
-      views: admin.firestore.FieldValue.increment(1),
-    });
 
     res.json({ success: true });
   } catch {
