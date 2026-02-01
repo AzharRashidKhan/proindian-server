@@ -3,7 +3,6 @@ const express = require("express");
 const cron = require("node-cron");
 const cors = require("cors");
 const admin = require("firebase-admin");
-const rateLimit = require("express-rate-limit");
 const axios = require("axios");
 
 const app = express();
@@ -31,7 +30,7 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-/* ================= SMART SUMMARY CLEANER ================= */
+/* ================= SUMMARY CLEANER ================= */
 
 function cleanAndTrimSummary(text, minWords = 80, maxWords = 110) {
   if (!text) return "";
@@ -65,7 +64,7 @@ function cleanAndTrimSummary(text, minWords = 80, maxWords = 110) {
   return finalText.trim();
 }
 
-/* ================= CATEGORY ================= */
+/* ================= HELPERS ================= */
 
 function mapCategory(newsDataCategory) {
   if (!newsDataCategory) return "India";
@@ -81,8 +80,6 @@ function mapCategory(newsDataCategory) {
   return "India";
 }
 
-/* ================= BREAKING ================= */
-
 function isBreaking(title) {
   const t = title.toLowerCase();
   return (
@@ -91,24 +88,6 @@ function isBreaking(title) {
     t.includes("alert") ||
     t.includes("just in")
   );
-}
-
-/* ================= DUPLICATE CHECK ================= */
-
-function normalizeTitle(title) {
-  return title
-    .toLowerCase()
-    .replace(/[^\w\s]/g, "")
-    .split(" ")
-    .filter((w) => w.length > 3);
-}
-
-function similarity(a, b) {
-  const setA = new Set(a);
-  const setB = new Set(b);
-  const intersection = [...setA].filter((w) => setB.has(w));
-  const union = new Set([...setA, ...setB]);
-  return intersection.length / union.size;
 }
 
 /* ================= DELETE OLD NEWS ================= */
@@ -134,10 +113,12 @@ async function deleteOldNews() {
   }
 }
 
-/* ================= FETCH NEWS (EN + HI) ================= */
+/* ================= FETCH NEWS ================= */
 
 async function fetchNewsByLanguage(lang) {
   try {
+    console.log(`Fetching ${lang} news...`);
+
     const response = await axios.get(
       "https://newsdata.io/api/1/news",
       {
@@ -158,13 +139,20 @@ async function fetchNewsByLanguage(lang) {
       const summary = cleanAndTrimSummary(item.description);
       if (!summary) continue;
 
-      const category = mapCategory(item.category?.[0]);
+      // Prevent duplicates by checking sourceUrl
+      const existing = await db
+        .collection("news")
+        .where("sourceUrl", "==", item.link)
+        .limit(1)
+        .get();
+
+      if (!existing.empty) continue;
 
       await db.collection("news").add({
         title: item.title,
         summary,
-        category,
-        language: lang, // ✅ IMPORTANT
+        category: mapCategory(item.category?.[0]),
+        language: lang,
         source: item.source_id || "News",
         sourceUrl: item.link,
         image: item.image_url || "",
@@ -177,7 +165,7 @@ async function fetchNewsByLanguage(lang) {
       });
     }
 
-    console.log(`Fetched ${lang} news`);
+    console.log(`${lang} news fetch completed`);
   } catch (err) {
     if (err.response) {
       console.error("NewsData Error:", err.response.data);
@@ -188,10 +176,25 @@ async function fetchNewsByLanguage(lang) {
 }
 
 async function fetchNews() {
-  console.log("Fetching EN + HI news...");
   await fetchNewsByLanguage("en");
   await fetchNewsByLanguage("hi");
 }
+
+/* ================= VIEW TRACKING ================= */
+
+app.post("/news/:id/view", async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    await db.collection("news").doc(id).update({
+      views: admin.firestore.FieldValue.increment(1),
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "View update failed" });
+  }
+});
 
 /* ================= TRENDING ================= */
 
@@ -203,15 +206,13 @@ app.get("/news/trending", async (req, res) => {
       .collection("news")
       .where("language", "==", language)
       .orderBy("timestamp", "desc")
-      .limit(100)
+      .limit(20)
       .get();
 
-    let news = snapshot.docs.map((doc) => ({
+    const news = snapshot.docs.map((doc) => ({
       id: doc.id,
       ...doc.data(),
     }));
-
-    news = news.slice(0, 20);
 
     res.json(news);
   } catch (err) {
@@ -219,7 +220,7 @@ app.get("/news/trending", async (req, res) => {
   }
 });
 
-/* ================= ROUTES ================= */
+/* ================= NEWS ROUTE ================= */
 
 app.get("/news", async (req, res) => {
   try {
@@ -228,7 +229,8 @@ app.get("/news", async (req, res) => {
     const lastTimestamp = req.query.lastTimestamp;
     const language = req.query.language || "en";
 
-    let query = db.collection("news")
+    let query = db
+      .collection("news")
       .where("language", "==", language);
 
     if (category && category !== "All") {
@@ -258,7 +260,8 @@ app.get("/news", async (req, res) => {
     }
 
     res.json({ articles, lastTimestamp: newCursor });
-  } catch {
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Pagination failed" });
   }
 });
