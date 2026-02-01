@@ -36,22 +36,12 @@ const db = admin.firestore();
 function cleanAndTrimSummary(text, minWords = 80, maxWords = 110) {
   if (!text) return "";
 
-  // Remove URLs
   text = text.replace(/https?:\/\/\S+/g, "");
-
-  // Remove twitter blocks
   text = text.replace(/pic\.twitter\.com\S*/g, "");
   text = text.replace(/—.*?(\.|\n)/g, "");
-
-  // Remove brackets
   text = text.replace(/\[.*?\]/g, "");
-
-  // Remove Also Read sections
   text = text.split("Also Read")[0];
-
-  // Protect decimals like 2.5
   text = text.replace(/(\d)\.(\d)/g, "$1_DECIMAL_$2");
-
   text = text.replace(/\s+/g, " ").trim();
 
   const sentences = text.match(/[^\.!\?]+[\.!\?]+/g);
@@ -132,10 +122,7 @@ async function deleteOldNews() {
       .where("timestamp", "<", sevenDaysAgo)
       .get();
 
-    if (snapshot.empty) {
-      console.log("No old news to delete");
-      return;
-    }
+    if (snapshot.empty) return;
 
     const batch = db.batch();
     snapshot.docs.forEach((doc) => batch.delete(doc.ref));
@@ -147,19 +134,17 @@ async function deleteOldNews() {
   }
 }
 
-/* ================= FETCH NEWS ================= */
+/* ================= FETCH NEWS (EN + HI) ================= */
 
-async function fetchNews() {
+async function fetchNewsByLanguage(lang) {
   try {
-    console.log("Fetching NewsData news...");
-
     const response = await axios.get(
       "https://newsdata.io/api/1/news",
       {
         params: {
           apikey: process.env.NEWSDATA_API_KEY,
           country: "in",
-          language: "en",
+          language: lang,
           category: "world,business,sports,technology,health",
         },
       }
@@ -167,70 +152,23 @@ async function fetchNews() {
 
     const articles = response.data.results || [];
 
-    const hoursWindow = 6;
-    const cutoff = new Date(Date.now() - hoursWindow * 60 * 60 * 1000);
-
-    const recentSnapshot = await db
-      .collection("news")
-      .where("timestamp", ">", cutoff)
-      .get();
-
-    const recent = recentSnapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
-
     for (const item of articles) {
       if (!item.title || !item.link) continue;
-
-      const newWords = normalizeTitle(item.title);
-      let duplicateDoc = null;
-      let highestSim = 0;
-
-      for (const existing of recent) {
-        const existingWords = normalizeTitle(existing.title);
-        const sim = similarity(newWords, existingWords);
-
-        if (sim > 0.65 && sim > highestSim) {
-          highestSim = sim;
-          duplicateDoc = existing;
-        }
-      }
 
       const summary = cleanAndTrimSummary(item.description);
       if (!summary) continue;
 
-      const image = item.image_url || "";
       const category = mapCategory(item.category?.[0]);
-      const breaking = isBreaking(item.title);
-
-      if (duplicateDoc) {
-        const docRef = db.collection("news").doc(duplicateDoc.id);
-        const update = {};
-
-        if (summary.length > (duplicateDoc.summary || "").length) {
-          update.summary = summary;
-        }
-
-        if (!duplicateDoc.image && image) {
-          update.image = image;
-        }
-
-        if (Object.keys(update).length > 0) {
-          await docRef.update(update);
-        }
-
-        continue;
-      }
 
       await db.collection("news").add({
         title: item.title,
         summary,
         category,
+        language: lang, // ✅ IMPORTANT
         source: item.source_id || "News",
         sourceUrl: item.link,
-        image,
-        breaking,
+        image: item.image_url || "",
+        breaking: isBreaking(item.title),
         likes: 0,
         views: 0,
         likedBy: [],
@@ -239,7 +177,7 @@ async function fetchNews() {
       });
     }
 
-    console.log("Fetch completed.");
+    console.log(`Fetched ${lang} news`);
   } catch (err) {
     if (err.response) {
       console.error("NewsData Error:", err.response.data);
@@ -249,35 +187,21 @@ async function fetchNews() {
   }
 }
 
-/* ================= CLEAN OLD SUMMARIES ================= */
-
-async function cleanExistingSummaries() {
-  console.log("Re-cleaning old summaries...");
-
-  const snapshot = await db.collection("news").get();
-  const batch = db.batch();
-  let count = 0;
-
-  snapshot.docs.forEach((doc) => {
-    const data = doc.data();
-    const cleaned = cleanAndTrimSummary(data.summary);
-
-    if (cleaned && cleaned !== data.summary) {
-      batch.update(doc.ref, { summary: cleaned });
-      count++;
-    }
-  });
-
-  if (count > 0) await batch.commit();
-  console.log("Updated:", count);
+async function fetchNews() {
+  console.log("Fetching EN + HI news...");
+  await fetchNewsByLanguage("en");
+  await fetchNewsByLanguage("hi");
 }
 
 /* ================= TRENDING ================= */
 
 app.get("/news/trending", async (req, res) => {
   try {
+    const language = req.query.language || "en";
+
     const snapshot = await db
       .collection("news")
+      .where("language", "==", language)
       .orderBy("timestamp", "desc")
       .limit(100)
       .get();
@@ -287,39 +211,13 @@ app.get("/news/trending", async (req, res) => {
       ...doc.data(),
     }));
 
-    news = news.map((article) => {
-      const likes = article.likes || 0;
-      const views = article.views || 0;
+    news = news.slice(0, 20);
 
-      const ageHours =
-        (Date.now() -
-          (article.timestamp?.toDate
-            ? article.timestamp.toDate().getTime()
-            : Date.now())) /
-        (1000 * 60 * 60);
-
-      const decayScore =
-        (likes * 4 + views * 1.5) /
-        Math.pow(ageHours + 2, 1.5);
-
-      const breakingBoost =
-        article.breaking && ageHours < 3 ? 20 : 0;
-
-      return {
-        ...article,
-        trendingScore: decayScore + breakingBoost,
-      };
-    });
-
-    news.sort((a, b) => b.trendingScore - a.trendingScore);
-
-    res.json(news.slice(0, 20));
+    res.json(news);
   } catch (err) {
-    console.error("Trending error:", err.message);
     res.status(500).json({ error: "Trending failed" });
   }
 });
-
 
 /* ================= ROUTES ================= */
 
@@ -328,8 +226,10 @@ app.get("/news", async (req, res) => {
     const limit = parseInt(req.query.limit) || 10;
     const category = req.query.category;
     const lastTimestamp = req.query.lastTimestamp;
+    const language = req.query.language || "en";
 
-    let query = db.collection("news");
+    let query = db.collection("news")
+      .where("language", "==", language);
 
     if (category && category !== "All") {
       query = query.where("category", "==", category);
@@ -369,7 +269,6 @@ cron.schedule("*/45 * * * *", fetchNews);
 cron.schedule("0 3 * * *", deleteOldNews);
 
 fetchNews();
-cleanExistingSummaries();
 
 /* ================= SERVER ================= */
 
