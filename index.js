@@ -118,7 +118,7 @@ function cleanAndTrimSummary(text, minWords = 80, maxWords = 110) {
   return finalText.trim();
 }
 
-/* ================= HELPERS ================= */
+/* ================= CATEGORY MAP ================= */
 
 function mapCategory(newsDataCategory) {
   if (!newsDataCategory) return "India";
@@ -173,7 +173,20 @@ async function fetchNewsByLanguage(lang) {
   try {
     console.log(`Fetching ${lang} news...`);
 
-    const response = await axios.get(
+    // 🔹 INDIA FULL CALL
+    const indiaResponse = await axios.get(
+      "https://newsdata.io/api/1/news",
+      {
+        params: {
+          apikey: process.env.NEWSDATA_API_KEY,
+          country: "in",
+          language: lang,
+        },
+      }
+    );
+
+    // 🔹 OTHER CATEGORIES CALL
+    const otherResponse = await axios.get(
       "https://newsdata.io/api/1/news",
       {
         params: {
@@ -185,14 +198,18 @@ async function fetchNewsByLanguage(lang) {
       }
     );
 
-    const articles = response.data.results || [];
+    const combinedArticles = [
+      ...(indiaResponse.data.results || []),
+      ...(otherResponse.data.results || []),
+    ];
 
-    for (const item of articles) {
+    for (const item of combinedArticles) {
       if (!item.title || !item.link) continue;
 
       const summary = cleanAndTrimSummary(item.description);
       if (!summary) continue;
 
+      // 🔒 DUPLICATE PROTECTION
       const existing = await db
         .collection("news")
         .where("sourceUrl", "==", item.link)
