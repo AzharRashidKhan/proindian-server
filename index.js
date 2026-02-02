@@ -50,10 +50,30 @@ app.post("/register-token", async (req, res) => {
   }
 });
 
+/* ================= PUSH LIMIT CONTROL ================= */
+
+async function canSendPush() {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const snapshot = await db
+    .collection("pushLogs")
+    .where("timestamp", ">", today)
+    .get();
+
+  return snapshot.size < 6; // max 6 pushes per day
+}
+
 /* ================= SEND BREAKING PUSH ================= */
 
 async function sendBreakingPush(articleData, articleId) {
   try {
+    const allowed = await canSendPush();
+    if (!allowed) {
+      console.log("Push limit reached today");
+      return;
+    }
+
     const snapshot = await db
       .collection("fcmTokens")
       .where("language", "==", articleData.language)
@@ -76,6 +96,11 @@ async function sendBreakingPush(articleData, articleId) {
       data: {
         articleId,
       },
+    });
+
+    await db.collection("pushLogs").add({
+      articleId,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
     });
 
     console.log("Push sent:", response.successCount);
@@ -173,7 +198,6 @@ async function fetchNewsByLanguage(lang) {
   try {
     console.log(`Fetching ${lang} news...`);
 
-    // 🔹 INDIA FULL CALL
     const indiaResponse = await axios.get(
       "https://newsdata.io/api/1/news",
       {
@@ -185,7 +209,6 @@ async function fetchNewsByLanguage(lang) {
       }
     );
 
-    // 🔹 OTHER CATEGORIES CALL
     const otherResponse = await axios.get(
       "https://newsdata.io/api/1/news",
       {
@@ -209,7 +232,6 @@ async function fetchNewsByLanguage(lang) {
       const summary = cleanAndTrimSummary(item.description);
       if (!summary) continue;
 
-      // 🔒 DUPLICATE PROTECTION
       const existing = await db
         .collection("news")
         .where("sourceUrl", "==", item.link)
@@ -260,16 +282,38 @@ async function fetchNews() {
   await fetchNewsByLanguage("hi");
 }
 
-/* ================= VIEW ================= */
+/* ================= TRENDING ================= */
 
-app.post("/news/:id/view", async (req, res) => {
+app.get("/news/trending", async (req, res) => {
   try {
-    await db.collection("news").doc(req.params.id).update({
-      views: admin.firestore.FieldValue.increment(1),
+    const language = req.query.language || "en";
+
+    const snapshot = await db
+      .collection("news")
+      .where("language", "==", language)
+      .orderBy("timestamp", "desc")
+      .limit(50)
+      .get();
+
+    const articles = snapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+
+    const scored = articles.map((a) => {
+      const score =
+        (a.views || 0) * 2 +
+        (a.likes || 0) * 3 +
+        (a.breaking ? 10 : 0);
+
+      return { ...a, score };
     });
-    res.json({ success: true });
+
+    scored.sort((a, b) => b.score - a.score);
+
+    res.json(scored.slice(0, 20));
   } catch {
-    res.status(500).json({ success: false });
+    res.status(500).json({ error: "Trending failed" });
   }
 });
 
