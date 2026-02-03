@@ -296,89 +296,97 @@ app.get("/news/trending", async (req, res) => {
       };
     });
 
-    /* ================= NEWS (INFINITE SCROLL) ================= */
+    scored.sort((a, b) => b.score - a.score);
 
-    app.get("/news", async (req, res) => {
-      try {
-        const limit = parseInt(req.query.limit) || 10;
-        const category = req.query.category;
-        const language = req.query.language || "en";
-        const cursor = req.query.cursor;
+    res.json(scored.slice(0, 20));
+  } catch (err) {
+    console.error("Trending failed:", err.message);
+    res.status(500).json({ error: "Trending failed" });
+  }
+});
 
-        let query = db
-          .collection("news")
-          .where("language", "==", language)
-          .orderBy("timestamp", "desc");
+/* ================= NEWS ================= */
 
-        if (category && category !== "All") {
-          query = query.where("category", "==", category);
-        }
+app.get("/news", async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 10;
+    const category = req.query.category;
+    const language = req.query.language || "en";
+    const cursor = req.query.cursor;
 
-        if (cursor) {
-          const cursorDoc = await db.collection("news").doc(cursor).get();
-          if (cursorDoc.exists) {
-            query = query.startAfter(cursorDoc);
-          }
-        }
+    let query = db.collection("news")
+      .where("language", "==", language);
 
-        query = query.limit(limit);
+    if (category && category !== "All") {
+      query = query.where("category", "==", category);
+    }
 
-        const snapshot = await query.get();
+    query = query.orderBy("timestamp", "desc");
 
-        const articles = snapshot.docs.map((doc) => ({
-          id: doc.id,
-          ...doc.data(),
-        }));
-
-        const nextCursor =
-          snapshot.docs.length > 0
-            ? snapshot.docs[snapshot.docs.length - 1].id
-            : null;
-
-        res.json({
-          articles,
-          nextCursor,
-        });
-      } catch {
-        res.status(500).json({ error: "Pagination failed" });
+    if (cursor) {
+      const cursorDoc = await db.collection("news").doc(cursor).get();
+      if (cursorDoc.exists) {
+        query = query.startAfter(cursorDoc);
       }
+    }
+
+    query = query.limit(limit);
+
+    const snapshot = await query.get();
+
+    const articles = snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+
+    const lastDoc = snapshot.docs[snapshot.docs.length - 1];
+
+    res.json({
+      articles,
+      nextCursor: lastDoc ? lastDoc.id : null,
     });
 
-    /* ================= LIKE ================= */
+  } catch (err) {
+    console.error("Pagination failed:", err.message);
+    res.status(500).json({ error: "Pagination failed" });
+  }
+});
 
-    app.post("/news/:id/like", async (req, res) => {
-      try {
-        const { deviceId } = req.body;
-        const docRef = db.collection("news").doc(req.params.id);
-        const doc = await docRef.get();
+/* ================= LIKE ================= */
 
-        if (!doc.exists) return res.status(404).json({ success: false });
+app.post("/news/:id/like", async (req, res) => {
+  try {
+    const { deviceId } = req.body;
+    const docRef = db.collection("news").doc(req.params.id);
+    const doc = await docRef.get();
 
-        const likedBy = doc.data().likedBy || [];
+    if (!doc.exists) return res.status(404).json({ success: false });
 
-        if (!likedBy.includes(deviceId)) {
-          await docRef.update({
-            likes: admin.firestore.FieldValue.increment(1),
-            likedBy: admin.firestore.FieldValue.arrayUnion(deviceId),
-          });
-        }
+    const likedBy = doc.data().likedBy || [];
 
-        res.json({ success: true });
-      } catch {
-        res.status(500).json({ success: false });
-      }
-    });
+    if (!likedBy.includes(deviceId)) {
+      await docRef.update({
+        likes: admin.firestore.FieldValue.increment(1),
+        likedBy: admin.firestore.FieldValue.arrayUnion(deviceId),
+      });
+    }
 
-    /* ================= CRON ================= */
+    res.json({ success: true });
+  } catch {
+    res.status(500).json({ success: false });
+  }
+});
 
-    cron.schedule("*/45 * * * *", fetchNews);
-    cron.schedule("0 3 * * *", deleteOldNews);
+/* ================= CRON ================= */
 
-    fetchNews();
+cron.schedule("*/45 * * * *", fetchNews);
+cron.schedule("0 3 * * *", deleteOldNews);
 
-    /* ================= SERVER ================= */
+fetchNews();
 
-    const PORT = process.env.PORT || 10000;
-    app.listen(PORT, () => {
-      console.log("Server running on port", PORT);
-    });
+/* ================= SERVER ================= */
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log("Server running on port", PORT);
+});
