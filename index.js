@@ -279,102 +279,106 @@ app.get("/news/trending", async (req, res) => {
       ...doc.data(),
     }));
 
-    const scored = articles.map((a) => ({
-      ...a,
-      score: (a.views || 0) * 2 + (a.likes || 0) * 3 + (a.breaking ? 10 : 0),
-    }));
+    const scored = articles.map((a) => {
+      const hoursOld =
+        (Date.now() - a.timestamp.toDate().getTime()) / 3600000;
 
-    scored.sort((a, b) => b.score - a.score);
+      const baseScore =
+        (a.views || 0) * 2 +
+        (a.likes || 0) * 3 +
+        (a.breaking ? 15 : 0);
 
-    res.json(scored.slice(0, 20));
-  } catch {
-    res.status(500).json({ error: "Trending failed" });
-  }
-});
+      const timeFactor = 1 / (1 + hoursOld);
 
-/* ================= NEWS (INFINITE SCROLL) ================= */
-
-app.get("/news", async (req, res) => {
-  try {
-    const limit = parseInt(req.query.limit) || 10;
-    const category = req.query.category;
-    const language = req.query.language || "en";
-    const cursor = req.query.cursor;
-
-    let query = db
-      .collection("news")
-      .where("language", "==", language)
-      .orderBy("timestamp", "desc");
-
-    if (category && category !== "All") {
-      query = query.where("category", "==", category);
-    }
-
-    if (cursor) {
-      const cursorDoc = await db.collection("news").doc(cursor).get();
-      if (cursorDoc.exists) {
-        query = query.startAfter(cursorDoc);
-      }
-    }
-
-    query = query.limit(limit);
-
-    const snapshot = await query.get();
-
-    const articles = snapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
-
-    const nextCursor =
-      snapshot.docs.length > 0
-        ? snapshot.docs[snapshot.docs.length - 1].id
-        : null;
-
-    res.json({
-      articles,
-      nextCursor,
+      return {
+        ...a,
+        score: baseScore * timeFactor,
+      };
     });
-  } catch {
-    res.status(500).json({ error: "Pagination failed" });
-  }
-});
 
-/* ================= LIKE ================= */
+    /* ================= NEWS (INFINITE SCROLL) ================= */
 
-app.post("/news/:id/like", async (req, res) => {
-  try {
-    const { deviceId } = req.body;
-    const docRef = db.collection("news").doc(req.params.id);
-    const doc = await docRef.get();
+    app.get("/news", async (req, res) => {
+      try {
+        const limit = parseInt(req.query.limit) || 10;
+        const category = req.query.category;
+        const language = req.query.language || "en";
+        const cursor = req.query.cursor;
 
-    if (!doc.exists) return res.status(404).json({ success: false });
+        let query = db
+          .collection("news")
+          .where("language", "==", language)
+          .orderBy("timestamp", "desc");
 
-    const likedBy = doc.data().likedBy || [];
+        if (category && category !== "All") {
+          query = query.where("category", "==", category);
+        }
 
-    if (!likedBy.includes(deviceId)) {
-      await docRef.update({
-        likes: admin.firestore.FieldValue.increment(1),
-        likedBy: admin.firestore.FieldValue.arrayUnion(deviceId),
-      });
-    }
+        if (cursor) {
+          const cursorDoc = await db.collection("news").doc(cursor).get();
+          if (cursorDoc.exists) {
+            query = query.startAfter(cursorDoc);
+          }
+        }
 
-    res.json({ success: true });
-  } catch {
-    res.status(500).json({ success: false });
-  }
-});
+        query = query.limit(limit);
 
-/* ================= CRON ================= */
+        const snapshot = await query.get();
 
-cron.schedule("*/45 * * * *", fetchNews);
-cron.schedule("0 3 * * *", deleteOldNews);
+        const articles = snapshot.docs.map((doc) => ({
+          id: doc.id,
+          ...doc.data(),
+        }));
 
-fetchNews();
+        const nextCursor =
+          snapshot.docs.length > 0
+            ? snapshot.docs[snapshot.docs.length - 1].id
+            : null;
 
-/* ================= SERVER ================= */
+        res.json({
+          articles,
+          nextCursor,
+        });
+      } catch {
+        res.status(500).json({ error: "Pagination failed" });
+      }
+    });
 
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
-});
+    /* ================= LIKE ================= */
+
+    app.post("/news/:id/like", async (req, res) => {
+      try {
+        const { deviceId } = req.body;
+        const docRef = db.collection("news").doc(req.params.id);
+        const doc = await docRef.get();
+
+        if (!doc.exists) return res.status(404).json({ success: false });
+
+        const likedBy = doc.data().likedBy || [];
+
+        if (!likedBy.includes(deviceId)) {
+          await docRef.update({
+            likes: admin.firestore.FieldValue.increment(1),
+            likedBy: admin.firestore.FieldValue.arrayUnion(deviceId),
+          });
+        }
+
+        res.json({ success: true });
+      } catch {
+        res.status(500).json({ success: false });
+      }
+    });
+
+    /* ================= CRON ================= */
+
+    cron.schedule("*/45 * * * *", fetchNews);
+    cron.schedule("0 3 * * *", deleteOldNews);
+
+    fetchNews();
+
+    /* ================= SERVER ================= */
+
+    const PORT = process.env.PORT || 10000;
+    app.listen(PORT, () => {
+      console.log("Server running on port", PORT);
+    });
