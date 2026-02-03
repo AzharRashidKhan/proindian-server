@@ -280,8 +280,9 @@ app.get("/news/trending", async (req, res) => {
     }));
 
     const scored = articles.map((a) => {
-      const hoursOld =
-        (Date.now() - a.timestamp.toDate().getTime()) / 3600000;
+      const hoursOld = a.timestamp
+        ? (Date.now() - a.timestamp.toDate().getTime()) / 3600000
+        : 100;
 
       const baseScore =
         (a.views || 0) * 2 +
