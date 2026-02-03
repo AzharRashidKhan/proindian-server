@@ -36,6 +36,10 @@ app.post("/register-token", async (req, res) => {
   try {
     const { token, language, interests } = req.body;
 
+    if (!token) {
+      return res.status(400).json({ success: false });
+    }
+
     await db.collection("fcmTokens").doc(token).set({
       token,
       language,
@@ -61,7 +65,7 @@ async function canSendPush() {
     .where("timestamp", ">", today)
     .get();
 
-  return snapshot.size < 6; // max 6 pushes per day
+  return snapshot.size < 6;
 }
 
 /* ================= SEND BREAKING PUSH ================= */
@@ -69,10 +73,7 @@ async function canSendPush() {
 async function sendBreakingPush(articleData, articleId) {
   try {
     const allowed = await canSendPush();
-    if (!allowed) {
-      console.log("Push limit reached today");
-      return;
-    }
+    if (!allowed) return;
 
     const snapshot = await db
       .collection("fcmTokens")
@@ -81,13 +82,9 @@ async function sendBreakingPush(articleData, articleId) {
       .get();
 
     const tokens = snapshot.docs.map((doc) => doc.data().token);
+    if (tokens.length === 0) return;
 
-    if (tokens.length === 0) {
-      console.log("No matching users for this push");
-      return;
-    }
-
-    const response = await admin.messaging().sendEachForMulticast({
+    await admin.messaging().sendEachForMulticast({
       tokens,
       notification: {
         title: "🚨 Breaking News",
@@ -102,8 +99,6 @@ async function sendBreakingPush(articleData, articleId) {
       articleId,
       timestamp: admin.firestore.FieldValue.serverTimestamp(),
     });
-
-    console.log("Push sent:", response.successCount);
   } catch (err) {
     console.error("Push error:", err.message);
   }
@@ -185,8 +180,6 @@ async function deleteOldNews() {
     const batch = db.batch();
     snapshot.docs.forEach((doc) => batch.delete(doc.ref));
     await batch.commit();
-
-    console.log("Deleted old news:", snapshot.size);
   } catch (err) {
     console.error("Delete old news error:", err.message);
   }
@@ -196,30 +189,22 @@ async function deleteOldNews() {
 
 async function fetchNewsByLanguage(lang) {
   try {
-    console.log(`Fetching ${lang} news...`);
+    const indiaResponse = await axios.get("https://newsdata.io/api/1/news", {
+      params: {
+        apikey: process.env.NEWSDATA_API_KEY,
+        country: "in",
+        language: lang,
+      },
+    });
 
-    const indiaResponse = await axios.get(
-      "https://newsdata.io/api/1/news",
-      {
-        params: {
-          apikey: process.env.NEWSDATA_API_KEY,
-          country: "in",
-          language: lang,
-        },
-      }
-    );
-
-    const otherResponse = await axios.get(
-      "https://newsdata.io/api/1/news",
-      {
-        params: {
-          apikey: process.env.NEWSDATA_API_KEY,
-          country: "in",
-          language: lang,
-          category: "world,business,sports,technology,health",
-        },
-      }
-    );
+    const otherResponse = await axios.get("https://newsdata.io/api/1/news", {
+      params: {
+        apikey: process.env.NEWSDATA_API_KEY,
+        country: "in",
+        language: lang,
+        category: "world,business,sports,technology,health",
+      },
+    });
 
     const combinedArticles = [
       ...(indiaResponse.data.results || []),
@@ -261,17 +246,11 @@ async function fetchNewsByLanguage(lang) {
 
       if (breaking) {
         await sendBreakingPush(
-          {
-            title: item.title,
-            category,
-            language: lang,
-          },
+          { title: item.title, category, language: lang },
           docRef.id
         );
       }
     }
-
-    console.log(`${lang} news fetch completed`);
   } catch (err) {
     console.error("Fetch error:", err.message);
   }
@@ -300,14 +279,10 @@ app.get("/news/trending", async (req, res) => {
       ...doc.data(),
     }));
 
-    const scored = articles.map((a) => {
-      const score =
-        (a.views || 0) * 2 +
-        (a.likes || 0) * 3 +
-        (a.breaking ? 10 : 0);
-
-      return { ...a, score };
-    });
+    const scored = articles.map((a) => ({
+      ...a,
+      score: (a.views || 0) * 2 + (a.likes || 0) * 3 + (a.breaking ? 10 : 0),
+    }));
 
     scored.sort((a, b) => b.score - a.score);
 
@@ -317,21 +292,32 @@ app.get("/news/trending", async (req, res) => {
   }
 });
 
-/* ================= NEWS ================= */
+/* ================= NEWS (INFINITE SCROLL) ================= */
 
 app.get("/news", async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 10;
     const category = req.query.category;
     const language = req.query.language || "en";
+    const cursor = req.query.cursor;
 
-    let query = db.collection("news").where("language", "==", language);
+    let query = db
+      .collection("news")
+      .where("language", "==", language)
+      .orderBy("timestamp", "desc");
 
     if (category && category !== "All") {
       query = query.where("category", "==", category);
     }
 
-    query = query.orderBy("timestamp", "desc").limit(limit);
+    if (cursor) {
+      const cursorDoc = await db.collection("news").doc(cursor).get();
+      if (cursorDoc.exists) {
+        query = query.startAfter(cursorDoc);
+      }
+    }
+
+    query = query.limit(limit);
 
     const snapshot = await query.get();
 
@@ -340,7 +326,15 @@ app.get("/news", async (req, res) => {
       ...doc.data(),
     }));
 
-    res.json({ articles });
+    const nextCursor =
+      snapshot.docs.length > 0
+        ? snapshot.docs[snapshot.docs.length - 1].id
+        : null;
+
+    res.json({
+      articles,
+      nextCursor,
+    });
   } catch {
     res.status(500).json({ error: "Pagination failed" });
   }
