@@ -92,7 +92,9 @@ async function sendBreakingPush(articleData, articleId) {
       },
       data: {
         articleId,
-      },
+        category: articleData.category,
+        language: articleData.language,
+      }
     });
 
     await db.collection("pushLogs").add({
