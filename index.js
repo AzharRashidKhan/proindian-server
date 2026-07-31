@@ -391,6 +391,8 @@ app.post("/news/:id/like", async (req, res) => {
 /* ================= TEST PUSH ================= */
 
 app.get("/test-push", async (req, res) => {
+  console.log("========== TEST PUSH ROUTE HIT ==========");
+
   try {
     await sendBreakingPush(
       {
@@ -401,9 +403,10 @@ app.get("/test-push", async (req, res) => {
       "test-article"
     );
 
+    console.log("========== sendBreakingPush COMPLETED ==========");
     res.send("Push request sent.");
   } catch (err) {
-    console.error(err);
+    console.error("TEST PUSH ERROR:", err);
     res.status(500).send(err.message);
   }
 });
