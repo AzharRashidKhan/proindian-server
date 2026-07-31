@@ -81,8 +81,20 @@ async function sendBreakingPush(articleData, articleId) {
       .where("interests", "array-contains", articleData.category)
       .get();
 
-    const tokens = snapshot.docs.map((doc) => doc.data().token);
-    if (tokens.length === 0) return;
+    console.log("Language:", articleData.language);
+console.log("Category:", articleData.category);
+
+console.log("Matching documents:", snapshot.size);
+
+const tokens = snapshot.docs.map((doc) => doc.data().token);
+
+console.log("Tokens found:", tokens.length);
+console.log(tokens);
+
+if (tokens.length === 0) {
+  console.log("NO TOKENS MATCHED");
+  return;
+}
 
     const response = await admin.messaging().sendEachForMulticast({
   tokens,
