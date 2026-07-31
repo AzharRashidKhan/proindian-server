@@ -84,19 +84,27 @@ async function sendBreakingPush(articleData, articleId) {
     const tokens = snapshot.docs.map((doc) => doc.data().token);
     if (tokens.length === 0) return;
 
-    await admin.messaging().sendEachForMulticast({
-      tokens,
-      notification: {
-        title: "🚨 Breaking News",
-        body: articleData.title,
-      },
-      data: {
-        articleId,
-        category: articleData.category,
-        language: articleData.language,
-      }
-    });
+    const response = await admin.messaging().sendEachForMulticast({
+  tokens,
+  notification: {
+    title: "🚨 Breaking News",
+    body: articleData.title,
+  },
+  data: {
+    articleId,
+    category: articleData.category,
+    language: articleData.language,
+  }
+});
 
+console.log("Push success:", response.successCount);
+console.log("Push failure:", response.failureCount);
+
+response.responses.forEach((r, i) => {
+  if (!r.success) {
+    console.log(tokens[i], r.error?.code);
+  }
+});
     await db.collection("pushLogs").add({
       articleId,
       timestamp: admin.firestore.FieldValue.serverTimestamp(),
@@ -377,6 +385,26 @@ app.post("/news/:id/like", async (req, res) => {
     res.json({ success: true });
   } catch {
     res.status(500).json({ success: false });
+  }
+});
+
+/* ================= TEST PUSH ================= */
+
+app.get("/test-push", async (req, res) => {
+  try {
+    await sendBreakingPush(
+      {
+        title: "🚨 Test Breaking News",
+        category: "India",
+        language: "en",
+      },
+      "test-article"
+    );
+
+    res.send("Push request sent.");
+  } catch (err) {
+    console.error(err);
+    res.status(500).send(err.message);
   }
 });
 
