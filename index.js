@@ -370,9 +370,14 @@ app.get("/news", async (req, res) => {
     });
 
   } catch (err) {
-    console.error("Pagination failed:", err.message);
-    res.status(500).json({ error: "Pagination failed" });
-  }
+  console.error("========== NEWS ROUTE ERROR ==========");
+  console.error(err);
+  console.error(err.stack);
+
+  res.status(500).json({
+    error: err.message,
+  });
+}
 });
 
 /* ================= LIKE ================= */
