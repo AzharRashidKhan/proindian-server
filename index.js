@@ -30,6 +30,25 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
+/* ================= MEMORY CACHE ================= */
+
+const newsCache = new Map();
+
+/*
+Key example:
+en_All
+en_Sports
+hi_All
+hi_Business
+
+Value:
+{
+  articles: [...],
+  nextCursor: "...",
+  expires: timestamp
+}
+*/
+const CACHE_TIME = 60 * 1000; // 60 seconds
 /* ================= REGISTER FCM TOKEN ================= */
 
 app.post("/register-token", async (req, res) => {
@@ -333,6 +352,17 @@ app.get("/news", async (req, res) => {
     const language = req.query.language || "en";
     const cursor = req.query.cursor;
 
+    const cacheKey = `${language}_${category || "All"}_${cursor || "first"}_${limit}`;
+
+const cached = newsCache.get(cacheKey);
+
+if (
+  cached &&
+  cached.expires > Date.now()
+) {
+  return res.json(cached.data);
+}
+
     let query = db.collection("news")
       .where("language", "==", language);
 
@@ -360,10 +390,18 @@ app.get("/news", async (req, res) => {
 
     const lastDoc = snapshot.docs[snapshot.docs.length - 1];
 
-    res.json({
-      articles,
-      nextCursor: lastDoc ? lastDoc.id : null,
-    });
+    const response = {
+  articles,
+  nextCursor: lastDoc ? lastDoc.id : null,
+};
+
+// Save into RAM cache
+newsCache.set(cacheKey, {
+  data: response,
+  expires: Date.now() + CACHE_TIME,
+});
+
+res.json(response);
 
   } catch (err) {
   console.error("========== NEWS ROUTE ERROR ==========");
