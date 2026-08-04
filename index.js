@@ -33,7 +33,9 @@ const db = admin.firestore();
 /* ================= MEMORY CACHE ================= */
 
 const newsCache = new Map();
-
+const trendingCache = {};
+const tokenCache = new Map();
+const viewQueue = new Map();
 /*
 Key example:
 en_All
@@ -53,20 +55,38 @@ const CACHE_TIME = 60 * 1000; // 60 seconds
 
 app.post("/register-token", async (req, res) => {
   try {
-    const { token, language, interests } = req.body;
+    const { token, language, interests = [] } = req.body;
 
     if (!token) {
       return res.status(400).json({ success: false });
     }
 
+    const cacheKey = token;
+    const cacheValue = JSON.stringify({
+      language,
+      interests,
+    });
+
+    if (tokenCache.get(cacheKey) === cacheValue) {
+      return res.json({
+        success: true,
+        cached: true,
+      });
+    }
+
     await db.collection("fcmTokens").doc(token).set({
       token,
       language,
-      interests: interests || [],
+      interests,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    res.json({ success: true });
+    tokenCache.set(cacheKey, cacheValue);
+
+    res.json({
+      success: true,
+      cached: false,
+    });
   } catch (err) {
     console.error("Token save error:", err.message);
     res.status(500).json({ success: false });
@@ -296,13 +316,26 @@ async function fetchNewsByLanguage(lang) {
 async function fetchNews() {
   await fetchNewsByLanguage("en");
   await fetchNewsByLanguage("hi");
+
+  // Clear trending cache after fresh news
+  delete trendingCache.en;
+  delete trendingCache.hi;
 }
 
-/* ================= TRENDING ================= */
 
 app.get("/news/trending", async (req, res) => {
   try {
     const language = req.query.language || "en";
+
+    const cache = trendingCache[language];
+
+    // Cache valid for 5 minutes
+    if (
+      cache &&
+      Date.now() - cache.timestamp < 5 * 60 * 1000
+    ) {
+      return res.json(cache.data);
+    }
 
     const snapshot = await db
       .collection("news")
@@ -336,13 +369,19 @@ app.get("/news/trending", async (req, res) => {
 
     scored.sort((a, b) => b.score - a.score);
 
-    res.json(scored.slice(0, 20));
+    const result = scored.slice(0, 20);
+
+    trendingCache[language] = {
+      timestamp: Date.now(),
+      data: result,
+    };
+
+    res.json(result);
   } catch (err) {
     console.error("Trending failed:", err.message);
     res.status(500).json({ error: "Trending failed" });
   }
 });
-
 /* ================= NEWS ================= */
 
 app.get("/news", async (req, res) => {
@@ -439,6 +478,19 @@ app.post("/news/:id/like", async (req, res) => {
   }
 });
 
+app.post("/news/:id/view", async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    viewQueue.set(id, (viewQueue.get(id) || 0) + 1);
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("View queue error:", err.message);
+    res.status(500).json({ success: false });
+  }
+});
+
 /* ================= TEST PUSH ================= */
 
 app.get("/test-push", async (req, res) => {
@@ -470,6 +522,30 @@ fetchNews();
 /* ================= SERVER ================= */
 
 const PORT = process.env.PORT || 10000;
+
+async function flushViewQueue() {
+  if (viewQueue.size === 0) return;
+
+  const batch = db.batch();
+
+  for (const [id, count] of viewQueue.entries()) {
+    const ref = db.collection("news").doc(id);
+
+    batch.update(ref, {
+      views: admin.firestore.FieldValue.increment(count),
+    });
+  }
+
+  await batch.commit();
+
+  viewQueue.clear();
+
+  console.log("View queue flushed");
+}
+
+// Flush every 5 minutes
+setInterval(flushViewQueue, 5 * 60 * 1000);
+
 app.listen(PORT, () => {
   console.log("Server running on port", PORT);
 });
