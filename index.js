@@ -81,18 +81,13 @@ async function sendBreakingPush(articleData, articleId) {
       .where("interests", "array-contains", articleData.category)
       .get();
 
-    console.log("Language:", articleData.language);
-console.log("Category:", articleData.category);
 
-console.log("Matching documents:", snapshot.size);
+
 
 const tokens = snapshot.docs.map((doc) => doc.data().token);
 
-console.log("Tokens found:", tokens.length);
-console.log(tokens);
 
 if (tokens.length === 0) {
-  console.log("NO TOKENS MATCHED");
   return;
 }
 
@@ -109,12 +104,13 @@ if (tokens.length === 0) {
   }
 });
 
-console.log("Push success:", response.successCount);
-console.log("Push failure:", response.failureCount);
 
 response.responses.forEach((r, i) => {
   if (!r.success) {
-    console.log(tokens[i], r.error?.code);
+    console.error(
+      `Push failed for token ${tokens[i]}:`,
+      r.error
+    );
   }
 });
     await db.collection("pushLogs").add({
@@ -408,7 +404,6 @@ app.post("/news/:id/like", async (req, res) => {
 /* ================= TEST PUSH ================= */
 
 app.get("/test-push", async (req, res) => {
-  console.log("========== TEST PUSH ROUTE HIT ==========");
 
   try {
     await sendBreakingPush(
@@ -420,7 +415,6 @@ app.get("/test-push", async (req, res) => {
       "test-article"
     );
 
-    console.log("========== sendBreakingPush COMPLETED ==========");
     res.send("Push request sent.");
   } catch (err) {
     console.error("TEST PUSH ERROR:", err);
