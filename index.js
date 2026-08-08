@@ -36,6 +36,8 @@ const newsCache = new Map();
 const trendingCache = {};
 const tokenCache = new Map();
 const viewQueue = new Map();
+const likeQueue = new Map();
+
 /*
 Key example:
 en_All
@@ -314,6 +316,8 @@ async function fetchNewsByLanguage(lang) {
 }
 
 async function fetchNews() {
+  await deleteOldNews();
+  
   await fetchNewsByLanguage("en");
   await fetchNewsByLanguage("hi");
 
