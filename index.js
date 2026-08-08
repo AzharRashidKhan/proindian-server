@@ -38,6 +38,8 @@ const tokenCache = new Map();
 const viewQueue = new Map();
 const likeQueue = new Map();
 
+const knownUrls = new Set();
+
 /*
 Key example:
 en_All
@@ -230,19 +232,67 @@ async function deleteOldNews() {
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
     const snapshot = await db
-      .collection("news")
-      .where("timestamp", "<", sevenDaysAgo)
-      .get();
+  .collection("news")
+  .where("timestamp", "<", sevenDaysAgo)
+  .limit(500)
+  .get();
 
     if (snapshot.empty) return;
 
-    const batch = db.batch();
-    snapshot.docs.forEach((doc) => batch.delete(doc.ref));
-    await batch.commit();
+   const batch = db.batch();
+
+snapshot.docs.forEach((doc) => {
+  const data = doc.data();
+
+  if (data.sourceUrl) {
+    knownUrls.delete(data.sourceUrl);
+  }
+
+  batch.delete(doc.ref);
+});
+
+await batch.commit();
   } catch (err) {
     console.error("Delete old news error:", err.message);
   }
 }
+
+/* ================= LOAD RECENT URL CACHE ================= */
+
+async function loadKnownUrls() {
+  try {
+    knownUrls.clear();
+
+    const sevenDaysAgo = new Date(
+      Date.now() - 7 * 24 * 60 * 60 * 1000
+    );
+
+    const snapshot = await db
+      .collection("news")
+      .where("timestamp", ">=", sevenDaysAgo)
+      .select("sourceUrl")
+      .get();
+
+    snapshot.forEach((doc) => {
+      const url = doc.data().sourceUrl;
+
+      if (url) {
+        knownUrls.add(url);
+      }
+    });
+
+    console.log(
+      `Loaded ${knownUrls.size} recent URLs into RAM`
+    );
+
+  } catch (err) {
+    console.error(
+      "URL cache load failed:",
+      err.message
+    );
+  }
+}
+
 
 /* ================= FETCH NEWS ================= */
 
@@ -276,13 +326,9 @@ async function fetchNewsByLanguage(lang) {
       const summary = cleanAndTrimSummary(item.description);
       if (!summary) continue;
 
-      const existing = await db
-        .collection("news")
-        .where("sourceUrl", "==", item.link)
-        .limit(1)
-        .get();
-
-      if (!existing.empty) continue;
+      if (knownUrls.has(item.link)) {
+  continue;
+}
 
       const category = mapCategory(item.category?.[0]);
       const breaking = isBreaking(item.title);
@@ -303,6 +349,8 @@ async function fetchNewsByLanguage(lang) {
         timestamp: admin.firestore.FieldValue.serverTimestamp(),
       });
 
+      knownUrls.add(item.link);
+
       if (breaking) {
         await sendBreakingPush(
           { title: item.title, category, language: lang },
@@ -317,7 +365,7 @@ async function fetchNewsByLanguage(lang) {
 
 async function fetchNews() {
   await deleteOldNews();
-  
+
   await fetchNewsByLanguage("en");
   await fetchNewsByLanguage("hi");
 
@@ -519,7 +567,6 @@ app.get("/test-push", async (req, res) => {
 /* ================= CRON ================= */
 
 cron.schedule("*/45 * * * *", fetchNews);
-cron.schedule("0 3 * * *", deleteOldNews);
 
 fetchNews();
 
@@ -550,6 +597,12 @@ async function flushViewQueue() {
 // Flush every 5 minutes
 setInterval(flushViewQueue, 5 * 60 * 1000);
 
-app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
-});
+async function startServer() {
+    await loadKnownUrls();
+
+    app.listen(PORT, () => {
+        console.log("Server running...");
+    });
+}
+
+startServer();
