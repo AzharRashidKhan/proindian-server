@@ -5,9 +5,25 @@ const cors = require("cors");
 const admin = require("firebase-admin");
 const axios = require("axios");
 
+const helmet = require("helmet");
+const compression = require("compression");
+const rateLimit = require("express-rate-limit");
+
 const app = express();
+
+app.use(helmet());
+app.use(compression());
+
 app.use(cors());
 app.use(express.json());
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 1000,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.use(limiter);
 
 /* ================= FIREBASE INIT ================= */
 
@@ -62,8 +78,25 @@ app.post("/register-token", async (req, res) => {
     const { token, language, interests = [] } = req.body;
 
     if (!token) {
-      return res.status(400).json({ success: false });
-    }
+  return res.status(400).json({
+    success: false,
+    error: "Token is required",
+  });
+}
+
+if (!["en", "hi"].includes(language)) {
+  return res.status(400).json({
+    success: false,
+    error: "Invalid language",
+  });
+}
+
+if (!Array.isArray(interests)) {
+  return res.status(400).json({
+    success: false,
+    error: "Interests must be an array",
+  });
+}
 
     const cacheKey = token;
     const cacheValue = JSON.stringify({
@@ -366,6 +399,8 @@ async function fetchNewsByLanguage(lang) {
 async function fetchNews() {
   await deleteOldNews();
 
+  newsCache.clear();
+
   await fetchNewsByLanguage("en");
   await fetchNewsByLanguage("hi");
 
@@ -510,6 +545,13 @@ res.json(response);
 app.post("/news/:id/like", async (req, res) => {
   try {
     const { deviceId } = req.body;
+    if (!deviceId) {
+  return res.status(400).json({
+    success: false,
+    error: "deviceId is required",
+  });
+}
+
     const docRef = db.collection("news").doc(req.params.id);
     const doc = await docRef.get();
 
@@ -543,9 +585,56 @@ app.post("/news/:id/view", async (req, res) => {
   }
 });
 
+/* ================= ADMIN STATS ================= */
+
+app.get("/admin/stats", async (req, res) => {
+  if (req.query.key !== process.env.ADMIN_KEY) {
+    return res.status(403).send("Forbidden");
+  }
+
+  try {
+    const tokenSnapshot = await db.collection("fcmTokens").count().get();
+    const newsSnapshot = await db.collection("news").count().get();
+
+    res.json({
+      status: "Online",
+
+      uptime: Math.floor(process.uptime()),
+
+      memory: process.memoryUsage(),
+
+      node: process.version,
+
+      newsArticles: newsSnapshot.data().count,
+
+      registeredUsers: tokenSnapshot.data().count,
+
+      newsCache: newsCache.size,
+
+      trendingCache: Object.keys(trendingCache).length,
+
+      knownUrls: knownUrls.size,
+
+      viewQueue: viewQueue.size,
+
+      likeQueue: likeQueue.size,
+    });
+
+  } catch (err) {
+    console.error(err);
+
+    res.status(500).json({
+      error: err.message,
+    });
+  }
+});
+
 /* ================= TEST PUSH ================= */
 
 app.get("/test-push", async (req, res) => {
+  if (req.query.key !== process.env.ADMIN_KEY) {
+    return res.status(403).send("Forbidden");
+  }
 
   try {
     await sendBreakingPush(
