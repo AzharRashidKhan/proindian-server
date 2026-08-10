@@ -296,15 +296,12 @@ async function loadKnownUrls() {
   try {
     knownUrls.clear();
 
-    const sevenDaysAgo = new Date(
-      Date.now() - 7 * 24 * 60 * 60 * 1000
-    );
-
     const snapshot = await db
-      .collection("news")
-      .where("timestamp", ">=", sevenDaysAgo)
-      .select("sourceUrl")
-      .get();
+  .collection("news")
+  .orderBy("timestamp", "desc")
+  .limit(300)
+  .select("sourceUrl")
+  .get();
 
     snapshot.forEach((doc) => {
       const url = doc.data().sourceUrl;
@@ -336,6 +333,7 @@ async function fetchNewsByLanguage(lang) {
         apikey: process.env.NEWSDATA_API_KEY,
         country: "in",
         language: lang,
+        removeduplicate: 1,
       },
     });
 
@@ -345,6 +343,7 @@ async function fetchNewsByLanguage(lang) {
         country: "in",
         language: lang,
         category: "world,business,sports,technology,health",
+        removeduplicate: 1,
       },
     });
 
@@ -355,6 +354,8 @@ async function fetchNewsByLanguage(lang) {
 
     for (const item of combinedArticles) {
       if (!item.title || !item.link) continue;
+
+      if (item.duplicate) continue;
 
       const summary = cleanAndTrimSummary(item.description);
       if (!summary) continue;
@@ -397,7 +398,6 @@ async function fetchNewsByLanguage(lang) {
 }
 
 async function fetchNews() {
-  await deleteOldNews();
 
   newsCache.clear();
 
@@ -528,16 +528,17 @@ newsCache.set(cacheKey, {
 });
 
 res.json(response);
-
-  } catch (err) {
+} catch (err) {
   console.error("========== NEWS ROUTE ERROR ==========");
   console.error(err);
-  console.error(err.stack);
 
-  res.status(500).json({
+  return res.status(500).json({
+    articles: [],
+    nextCursor: null,
     error: err.message,
   });
 }
+  
 });
 
 /* ================= LIKE ================= */
@@ -656,6 +657,7 @@ app.get("/test-push", async (req, res) => {
 /* ================= CRON ================= */
 
 cron.schedule("*/45 * * * *", fetchNews);
+cron.schedule("0 3 * * *", deleteOldNews);
 
 fetchNews();
 
