@@ -10,6 +10,7 @@ const compression = require("compression");
 const rateLimit = require("express-rate-limit");
 
 const app = express();
+app.set("trust proxy", 1);
 
 app.use(helmet());
 app.use(compression());
@@ -181,14 +182,33 @@ if (tokens.length === 0) {
 });
 
 
+const deletePromises = [];
+
 response.responses.forEach((r, i) => {
+
   if (!r.success) {
+
     console.error(
       `Push failed for token ${tokens[i]}:`,
       r.error
     );
+
+    // Remove invalid FCM token
+    if (
+      r.error?.code ===
+      "messaging/registration-token-not-registered"
+    ) {
+
+      deletePromises.push(
+        db.collection("fcmTokens")
+          .doc(tokens[i])
+          .delete()
+      );
+    }
   }
 });
+
+await Promise.all(deletePromises);
     await db.collection("pushLogs").add({
       articleId,
       timestamp: admin.firestore.FieldValue.serverTimestamp(),
@@ -261,6 +281,9 @@ function isBreaking(title) {
 /* ================= DELETE OLD NEWS ================= */
 
 async function deleteOldNews() {
+
+  console.log("Running deleteOldNews()");
+
   try {
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
@@ -312,8 +335,8 @@ async function loadKnownUrls() {
     });
 
     console.log(
-      `Loaded ${knownUrls.size} recent URLs into RAM`
-    );
+  `Loaded ${knownUrls.size} URLs into RAM at ${new Date().toISOString()}`
+);
 
   } catch (err) {
     console.error(
