@@ -682,7 +682,7 @@ app.get("/test-push", async (req, res) => {
 cron.schedule("*/45 * * * *", fetchNews);
 cron.schedule("0 3 * * *", deleteOldNews);
 
-fetchNews();
+
 
 /* ================= SERVER ================= */
 
