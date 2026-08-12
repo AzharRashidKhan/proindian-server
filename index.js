@@ -57,6 +57,8 @@ const likeQueue = new Map();
 
 const knownUrls = new Set();
 
+const fcmTokenCache = new Map();
+
 /*
 Key example:
 en_All
@@ -120,6 +122,24 @@ if (!Array.isArray(interests)) {
     });
 
     tokenCache.set(cacheKey, cacheValue);
+    
+    // Update RAM cache
+
+interests.forEach((category) => {
+
+  const key = `${language}_${category}`;
+
+  if (!fcmTokenCache.has(key)) {
+    fcmTokenCache.set(key, []);
+  }
+
+  const tokens = fcmTokenCache.get(key);
+
+  if (!tokens.includes(token)) {
+    tokens.push(token);
+  }
+
+});
 
     res.json({
       success: true,
@@ -152,17 +172,9 @@ async function sendBreakingPush(articleData, articleId) {
     const allowed = await canSendPush();
     if (!allowed) return;
 
-    const snapshot = await db
-      .collection("fcmTokens")
-      .where("language", "==", articleData.language)
-      .where("interests", "array-contains", articleData.category)
-      .get();
+    const key = `${articleData.language}_${articleData.category}`;
 
-
-
-
-const tokens = snapshot.docs.map((doc) => doc.data().token);
-
+const tokens = fcmTokenCache.get(key) || [];
 
 if (tokens.length === 0) {
   return;
@@ -204,6 +216,14 @@ response.responses.forEach((r, i) => {
           .doc(tokens[i])
           .delete()
       );
+      const cachedTokens = fcmTokenCache.get(key);
+
+if (cachedTokens) {
+  fcmTokenCache.set(
+    key,
+    cachedTokens.filter((t) => t !== tokens[i])
+  );
+}
     }
   }
 });
@@ -346,6 +366,55 @@ async function loadKnownUrls() {
   }
 }
 
+/* ================= LOAD FCM TOKENS ================= */
+
+async function loadFcmTokens() {
+  try {
+
+    fcmTokenCache.clear();
+
+    const snapshot = await db
+      .collection("fcmTokens")
+      .get();
+
+    snapshot.forEach((doc) => {
+
+      const data = doc.data();
+
+      const language = data.language;
+      const interests = data.interests || [];
+
+      interests.forEach((category) => {
+
+        const key = `${language}_${category}`;
+
+        if (!fcmTokenCache.has(key)) {
+          fcmTokenCache.set(key, []);
+        }
+
+        const list = fcmTokenCache.get(key);
+
+if (!list.includes(data.token)) {
+    list.push(data.token);
+}
+
+      });
+
+    });
+
+    console.log(
+      `Loaded ${snapshot.size} FCM tokens into RAM`
+    );
+
+  } catch (err) {
+
+    console.error(
+      "FCM cache load failed:",
+      err.message
+    );
+
+  }
+}
 
 /* ================= FETCH NEWS ================= */
 
@@ -734,6 +803,7 @@ async function startServer() {
   try {
 
     await loadKnownUrls();
+    await loadFcmTokens();
 
     app.listen(PORT, () => {
       console.log("Server running...");
