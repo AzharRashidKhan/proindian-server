@@ -351,24 +351,28 @@ async function loadKnownUrls() {
 
 async function fetchNewsByLanguage(lang) {
   try {
-    const indiaResponse = await axios.get("https://newsdata.io/api/1/news", {
-      params: {
-        apikey: process.env.NEWSDATA_API_KEY,
-        country: "in",
-        language: lang,
-        removeduplicate: 1,
-      },
-    });
+    const [indiaResponse, otherResponse] = await Promise.all([
+  axios.get("https://newsdata.io/api/1/news", {
+    timeout: 15000,
+    params: {
+      apikey: process.env.NEWSDATA_API_KEY,
+      country: "in",
+      language: lang,
+      removeduplicate: 1,
+    },
+  }),
 
-    const otherResponse = await axios.get("https://newsdata.io/api/1/news", {
-      params: {
-        apikey: process.env.NEWSDATA_API_KEY,
-        country: "in",
-        language: lang,
-        category: "world,business,sports,technology,health",
-        removeduplicate: 1,
-      },
-    });
+  axios.get("https://newsdata.io/api/1/news", {
+    timeout: 15000,
+    params: {
+      apikey: process.env.NEWSDATA_API_KEY,
+      country: "in",
+      language: lang,
+      category: "world,business,sports,technology,health",
+      removeduplicate: 1,
+    },
+  }),
+]);
 
     const combinedArticles = [
       ...(indiaResponse.data.results || []),
@@ -679,7 +683,22 @@ app.get("/test-push", async (req, res) => {
 
 /* ================= CRON ================= */
 
-cron.schedule("*/45 * * * *", fetchNews);
+let fetchingNews = false;
+
+cron.schedule("*/45 * * * *", async () => {
+  if (fetchingNews) {
+    console.log("Previous fetch still running. Skipping this cycle.");
+    return;
+  }
+
+  fetchingNews = true;
+
+  try {
+    await fetchNews();
+  } finally {
+    fetchingNews = false;
+  }
+});
 cron.schedule("0 3 * * *", deleteOldNews);
 
 
@@ -712,11 +731,19 @@ async function flushViewQueue() {
 setInterval(flushViewQueue, 5 * 60 * 1000);
 
 async function startServer() {
+  try {
+
     await loadKnownUrls();
 
     app.listen(PORT, () => {
-        console.log("Server running...");
+      console.log("Server running...");
     });
+
+  } catch (err) {
+
+    console.error("Startup failed:", err);
+
+  }
 }
 
 startServer();
