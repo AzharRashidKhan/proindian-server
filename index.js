@@ -669,6 +669,46 @@ app.post("/news/:id/like", async (req, res) => {
   }
 });
 
+/* ================= UNLIKE ================= */
+
+app.post("/news/:id/unlike", async (req, res) => {
+  try {
+    const { deviceId } = req.body;
+
+    if (!deviceId) {
+      return res.status(400).json({
+        success: false,
+        error: "deviceId is required",
+      });
+    }
+
+    const docRef = db.collection("news").doc(req.params.id);
+    const doc = await docRef.get();
+
+    if (!doc.exists) {
+      return res.status(404).json({
+        success: false,
+        error: "Article not found",
+      });
+    }
+
+    const likedBy = doc.data().likedBy || [];
+
+    if (likedBy.includes(deviceId)) {
+      await docRef.update({
+        likes: admin.firestore.FieldValue.increment(-1),
+        likedBy: admin.firestore.FieldValue.arrayRemove(deviceId),
+      });
+    }
+
+    res.json({ success: true });
+
+  } catch (error) {
+    console.error("Unlike error:", error);
+    res.status(500).json({ success: false });
+  }
+});
+
 app.post("/news/:id/view", async (req, res) => {
   try {
     const id = req.params.id;
