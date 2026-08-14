@@ -565,6 +565,47 @@ app.get("/news/trending", async (req, res) => {
     res.status(500).json({ error: "Trending failed" });
   }
 });
+
+/* ================= SINGLE NEWS ARTICLE ================= */
+
+app.get("/news/article/:id", async (req, res) => {
+  try {
+    const articleId = req.params.id;
+
+    if (!articleId) {
+      return res.status(400).json({
+        success: false,
+        error: "Article ID is required",
+      });
+    }
+
+    const doc = await db
+      .collection("news")
+      .doc(articleId)
+      .get();
+
+    if (!doc.exists) {
+      return res.status(404).json({
+        success: false,
+        error: "Article not found",
+      });
+    }
+
+    res.json({
+      id: doc.id,
+      ...doc.data(),
+    });
+
+  } catch (err) {
+    console.error("Single article fetch error:", err.message);
+
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch article",
+    });
+  }
+});
+
 /* ================= NEWS ================= */
 
 app.get("/news", async (req, res) => {
