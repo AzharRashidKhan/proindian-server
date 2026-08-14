@@ -637,6 +637,58 @@ res.json(response);
   
 });
 
+/* ================= SEARCH ================= */
+
+app.get("/news/search", async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim().toLowerCase();
+    const language = String(req.query.language || "en");
+
+    if (!q) {
+      return res.json([]);
+    }
+
+    const snapshot = await db
+      .collection("news")
+      .where("language", "==", language)
+      .orderBy("timestamp", "desc")
+      .limit(300)
+      .get();
+
+    const searchTerms = q
+      .split(/\s+/)
+      .filter(Boolean);
+
+    const articles = snapshot.docs
+      .map((doc) => ({
+        id: doc.id,
+        ...doc.data(),
+      }))
+      .filter((article) => {
+        const searchableText = `
+          ${article.title || ""}
+          ${article.summary || ""}
+          ${article.source || ""}
+          ${article.category || ""}
+        `.toLowerCase();
+
+        return searchTerms.every((term) =>
+          searchableText.includes(term)
+        );
+      })
+      .slice(0, 30);
+
+    res.json(articles);
+  } catch (err) {
+    console.error("Search error:", err.message);
+
+    res.status(500).json({
+      success: false,
+      error: "Search failed",
+    });
+  }
+});
+
 /* ================= LIKE ================= */
 
 app.post("/news/:id/like", async (req, res) => {
